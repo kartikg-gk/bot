@@ -2,6 +2,8 @@
 
 import json
 
+from delta_gateway.schedule import parse_when
+
 MAX_ANSWER = 20000
 TEXT = {"type": "string", "minLength": 1}
 
@@ -48,6 +50,36 @@ CHIEF_TOOLS = [
         },
         approval=False,
     ),
+    dict(
+        name="schedule_job",
+        description=(
+            "Schedule a self-contained task, only when the user asks. when is `every 30m`, "
+            "`daily 08:00` in the host's time zone, or `at 2026-11-02T08:00+05:30`. The result is "
+            "sent to this chat. Omit bot_name to run it yourself."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {"when": TEXT, "task": TEXT, "bot_name": TEXT},
+            "required": ["when", "task"],
+            "additionalProperties": False,
+        },
+    ),
+    dict(
+        name="list_scheduled_jobs",
+        description="List active scheduled jobs.",
+        parameters={"type": "object", "properties": {}, "additionalProperties": False},
+        approval=False,
+    ),
+    dict(
+        name="cancel_scheduled_job",
+        description="Cancel a scheduled job when the user asks.",
+        parameters={
+            "type": "object",
+            "properties": {"job_id": {"type": "integer"}},
+            "required": ["job_id"],
+            "additionalProperties": False,
+        },
+    ),
 ]
 
 CHIEF_PROMPT = (
@@ -71,7 +103,32 @@ class Team:
             raise ValueError("That is you. Do the work yourself.")
         return bot
 
-    async def run(self, name, arguments, route, event=None):
+    def schedule(self, when, task, bot, route, actor):
+        spec, first = parse_when(when)
+        return self.store.add_job(
+            route.chat, route.user, actor, route.thread, bot.id, task, spec, first
+        )
+
+    async def run(self, name, arguments, route, event=None, actor=None):
+        if name == "schedule_job":
+            requested = arguments.get("bot_name")
+            bot = self.store.find_bot(requested) if requested else self.store.bots()[0]
+            if not bot:
+                raise ValueError(f"No bot named {requested}. Use list_bots.")
+            identifier = self.schedule(
+                arguments["when"], arguments["task"], bot, route, actor or route.user
+            )
+            return f"Scheduled job {identifier}."
+        if name == "list_scheduled_jobs":
+            return json.dumps(
+                [
+                    dict(id=j.id, bot=self.store.bot(j.bot).name, task=j.task, schedule=j.spec)
+                    for j in self.store.jobs()
+                ]
+            )
+        if name == "cancel_scheduled_job":
+            self.store.cancel_job(arguments["job_id"])
+            return "Cancelled."
         if name == "list_bots":
             return json.dumps(
                 [

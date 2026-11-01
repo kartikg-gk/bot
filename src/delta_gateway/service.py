@@ -19,6 +19,7 @@ from delta_gateway.version_check import status as version_status
 
 HELP = (
     "/bot [name] /bot new <name> | <purpose>\n"
+    "/jobs /schedule <when> | [bot] | <task> /unschedule <number>\n"
     "/status /new /name <name> /sessions /switch <id> /clone\n"
     "/compact [instructions] /export /last /stop\n"
     "/models /model <provider/model-id> /thinking <level>\n"
@@ -36,6 +37,7 @@ class Service:
         self.sessions = SessionManager(config, self.store, factory=factory)
         self.team = Team(self.store, self.sessions)
         self.jobs, self.cards, self.previews = {}, {}, {}
+        self.job_tasks = {}
         self.slots = asyncio.Semaphore(config.workers or 2**30)
         self.dispatch_lock = asyncio.Lock()
         self.stopping = False
@@ -60,7 +62,7 @@ class Service:
         for piece in chunks(text, 3900):
             await self.notify(route.key, piece)
 
-    async def card(self, key, client, event, *, actor=None):
+    async def card(self, key, client, event, *, actor=None, job=None):
         identifier = event.get("approvalId", event.get("approval_id"))
         normalized = dict(
             approval_id=identifier,
@@ -72,7 +74,9 @@ class Service:
         )
         self.store.audit(normalized, key[0], actor or key[1], key[2])
         handle = uuid4().hex
-        card = dict(key=key, actor=actor or key[1], client=client, event=normalized, message=None)
+        card = dict(
+            key=key, actor=actor or key[1], client=client, event=normalized, message=None, job=job
+        )
         self.cards[handle] = card
         try:
             text = (
@@ -186,7 +190,7 @@ class Service:
                 if not self.store.bot(self.store.get_route(route.id).bot).chief:
                     raise ValueError("Only the chief of staff can use this tool.")
                 output = await self.team.run(
-                    record["name"], record.get("arguments", {}), route, delegated
+                    record["name"], record.get("arguments", {}), route, delegated, item.actor
                 )
             except (ValueError, RuntimeError, OSError, KeyError) as exc:
                 output = str(exc) if isinstance(exc, ValueError) else "The task failed."
@@ -261,7 +265,7 @@ class Service:
             activity.cancel()
             await asyncio.gather(activity, return_exceptions=True)
             for handle, card in list(self.cards.items()):
-                if card["key"] == item.key:
+                if card["key"] == item.key and card["job"] is None:
                     await self.resolve_card(handle, False, "run_closed")
             await preview.finish()
             self.previews.pop(item.key, None)
@@ -305,7 +309,7 @@ class Service:
             await asyncio.gather(task, return_exceptions=True)
             self.jobs.pop(item.key, None)
         for handle, card in list(self.cards.items()):
-            if card["key"] == item.key:
+            if card["key"] == item.key and card["job"] is None:
                 await self.resolve_card(handle, False, "stopped")
         return "Abort requested; queued prompts cleared."
 
@@ -377,6 +381,107 @@ class Service:
                     else "Invalid command or local configuration. Use /help.",
                 )
 
+    def run_due(self):
+        for job in self.store.claim_due(time.time()):
+            task = asyncio.create_task(self.run_job(job))
+            self.job_tasks[job.id] = task
+            task.add_done_callback(
+                lambda _, identifier=job.id: self.job_tasks.pop(identifier, None)
+            )
+
+    async def run_job(self, job):
+        bot = self.store.bot(job.bot)
+        route = self.store.conversation(*job.key)
+        calls = set()
+
+        async def approvals(client, record):
+            kind = record.get("type")
+            if kind == "approval_requested":
+                await self.card(job.key, client, record, actor=job.actor, job=job.id)
+            elif kind == "approval_resolved":
+                for handle, card in list(self.cards.items()):
+                    if card["event"]["approval_id"] == record["approvalId"]:
+                        await self.resolve_card(handle, record["allow"], "worker")
+
+        async def delegated(_bot, client, record):
+            await approvals(client, record)
+
+        async def host_call(client, record):
+            output, failed = "", False
+            try:
+                output = await self.team.run(
+                    record["name"], record.get("arguments", {}), route, delegated, job.actor
+                )
+            except (ValueError, RuntimeError, OSError, KeyError) as exc:
+                output = str(exc) if isinstance(exc, ValueError) else "The task failed."
+                failed = True
+            with contextlib.suppress(RuntimeError):
+                await client.request(
+                    "respond_to_host_tool", callId=record["callId"], output=output, isError=failed
+                )
+
+        async def event(client, record):
+            if record.get("type") == "host_tool_call" and bot.chief:
+                call = asyncio.create_task(host_call(client, record))
+                calls.add(call)
+                call.add_done_callback(calls.discard)
+            else:
+                await approvals(client, record)
+
+        status, answer = "interrupted", ""
+        record = None
+        try:
+            if not bot:
+                raise ValueError("This job's bot no longer exists.")
+            if not bot.chief:
+                record = self.store.begin_delegation(route.id, bot, job.task)
+            answer, status = await self.sessions.delegate(bot, job.task, event)
+            await self.reply(
+                route, f"Job #{job.id} ({bot.name}), {status}:\n{answer or 'No answer.'}"
+            )
+        except ValueError as exc:
+            status, answer = "failed", str(exc)
+            with contextlib.suppress(TelegramError):
+                await self.notify(job.key, f"Job #{job.id} could not run: {exc}")
+        except (RuntimeError, OSError):
+            status = "delivery_failed" if status == "completed" else "failed"
+            with contextlib.suppress(TelegramError):
+                await self.notify(job.key, f"Job #{job.id} failed. It was not retried.")
+        finally:
+            for call in list(calls):
+                call.cancel()
+            await asyncio.gather(*calls, return_exceptions=True)
+            for handle, card in list(self.cards.items()):
+                if card["job"] == job.id:
+                    await self.resolve_card(handle, False, "run_closed")
+            if record is not None:
+                self.store.finish_delegation(record, status, answer)
+            self.store.finish_job(job.id, status)
+
+    def schedule_command(self, route, actor, command, argument):
+        if command == "/jobs":
+            jobs = self.store.jobs()
+            if not jobs:
+                return "No scheduled jobs."
+            return "\n".join(
+                f"#{j.id} {j.spec} {self.store.bot(j.bot).name}: {j.task[:100]}" for j in jobs
+            )
+        if command == "/unschedule":
+            if not argument.isdigit():
+                raise ValueError("Use /unschedule <number>")
+            self.store.cancel_job(int(argument))
+            if task := self.job_tasks.get(int(argument)):
+                task.cancel()
+            return f"Cancelled job #{argument}."
+        pieces = [piece.strip() for piece in argument.split("|", 2)]
+        if len(pieces) < 2 or not pieces[-1]:
+            raise ValueError("Use every 30m, daily 08:00, or at <time> | [bot] | <task>")
+        bot = self.store.find_bot(pieces[1]) if len(pieces) == 3 else self.store.bots()[0]
+        if not bot:
+            raise ValueError("No bot with that name. Use /bot to list them.")
+        identifier = self.team.schedule(pieces[0], pieces[-1], bot, route, actor)
+        return f"Scheduled job #{identifier} for {bot.name}."
+
     async def bot_command(self, route, argument):
         route = self.store.conversation(*route.key)
         if not argument:
@@ -412,6 +517,9 @@ class Service:
                 if command == "/bot":
                     before_send()
                     reply = await self.bot_command(route, argument)
+                elif command in {"/jobs", "/schedule", "/unschedule"}:
+                    before_send()
+                    reply = self.schedule_command(route, item.actor, command, argument)
                 elif command == "/switch":
                     target = self.store.get_route(int(argument))
                     if not target or target.user not in {0, item.actor}:
@@ -549,6 +657,9 @@ class Service:
                 elif is_command:
                     if command not in {
                         "/bot",
+                        "/jobs",
+                        "/schedule",
+                        "/unschedule",
                         "/new",
                         "/clone",
                         "/name",
@@ -594,6 +705,7 @@ class Service:
                     for name, description in (
                         ("help", "Show help"),
                         ("bot", "List or switch bots"),
+                        ("jobs", "Scheduled jobs"),
                         ("status", "Current Delta session"),
                         ("new", "Start a fresh session"),
                         ("name", "Name this session"),
@@ -627,14 +739,16 @@ class Service:
                 elif callback := update.get("callback_query"):
                     await self.callback(callback)
             await self.dispatch()
+            self.run_due()
             await self.cleanup_idle()
             self.store.retain()
 
     async def close(self):
         self.stopping = True
-        for job in self.jobs.values():
+        running = [*self.jobs.values(), *self.job_tasks.values()]
+        for job in running:
             job.cancel()
-        await asyncio.gather(*self.jobs.values(), return_exceptions=True)
+        await asyncio.gather(*running, return_exceptions=True)
         await self.sessions.close()
         for user in self.config.users:
             with contextlib.suppress(TelegramError):

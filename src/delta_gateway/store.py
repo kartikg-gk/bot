@@ -10,6 +10,7 @@ from uuid import uuid4
 from delta_gateway.bots import Bot
 from delta_gateway.migrations import SCHEMA, migrate
 from delta_gateway.routing import admit_message
+from delta_gateway.schedule import next_run
 
 
 @dataclass
@@ -32,6 +33,35 @@ class Conversation:
     @property
     def key(self):
         return self.chat, self.user, self.thread
+
+
+@dataclass
+class Job:
+    id: int
+    chat: int
+    user: int
+    actor: int
+    thread: int
+    bot: str
+    task: str
+    spec: str
+    next_run: float | None
+    missed: str
+    status: str
+    running: int
+    last_status: str | None
+    last_run: float | None
+
+    @property
+    def key(self):
+        return self.chat, self.user, self.thread
+
+
+JOB_FIELDS = (
+    "id,chat,user,actor,thread,bot,task,spec,next_run,missed,status,running,last_status,last_run"
+)
+MAX_ACTIVE_JOBS = 50
+MISSED_GRACE = 300
 
 
 @dataclass
@@ -106,6 +136,11 @@ class Store:
                 (instance,),
             )
             self.db.execute(
+                "UPDATE jobs SET running=0,last_status='interrupted' "
+                "WHERE instance=? AND running=1",
+                (instance,),
+            )
+            self.db.execute(
                 "UPDATE delegations SET status='interrupted',finished=? "
                 "WHERE instance=? AND status='running'",
                 (time.time(), instance),
@@ -168,6 +203,89 @@ class Store:
                 (identifier, self.instance, name, name.casefold(), role, instructions, time.time()),
             )
         return self.bot(identifier)
+
+    def add_job(self, chat, user, actor, thread, bot, task, spec, first, missed="run"):
+        with self.db:
+            active = self.db.execute(
+                "SELECT count(*) FROM jobs WHERE instance=? AND status='active'", (self.instance,)
+            ).fetchone()[0]
+            if active >= MAX_ACTIVE_JOBS:
+                raise ValueError(f"At most {MAX_ACTIVE_JOBS} jobs can be active")
+            return self.db.execute(
+                "INSERT INTO jobs(instance,chat,user,actor,thread,bot,task,spec,next_run,missed,"
+                "created) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    self.instance,
+                    chat,
+                    user,
+                    actor,
+                    thread,
+                    bot,
+                    task,
+                    spec,
+                    first,
+                    missed,
+                    time.time(),
+                ),
+            ).lastrowid
+
+    def job(self, identifier):
+        row = self.db.execute(
+            f"SELECT {JOB_FIELDS} FROM jobs WHERE instance=? AND id=?", (self.instance, identifier)
+        ).fetchone()
+        return Job(*row) if row else None
+
+    def jobs(self):
+        return [
+            Job(*row)
+            for row in self.db.execute(
+                f"SELECT {JOB_FIELDS} FROM jobs WHERE instance=? AND status='active' ORDER BY id",
+                (self.instance,),
+            ).fetchall()
+        ]
+
+    def claim_due(self, now):
+        """Advance each due job before it runs, so a crash can never run it twice."""
+        claimed = []
+        with self.db:
+            for row in self.db.execute(
+                f"SELECT {JOB_FIELDS} FROM jobs WHERE instance=? AND status='active' "
+                "AND running=0 AND next_run<=?",
+                (self.instance, now),
+            ).fetchall():
+                job = Job(*row)
+                upcoming = next_run(job.spec, now)
+                status = "active" if upcoming is not None else "done"
+                if job.missed == "skip" and now - job.next_run > MISSED_GRACE:
+                    self.db.execute(
+                        "UPDATE jobs SET next_run=?,status=?,last_status='missed' WHERE id=?",
+                        (upcoming, status, job.id),
+                    )
+                    continue
+                self.db.execute(
+                    "UPDATE jobs SET next_run=?,status=?,running=1,last_run=? WHERE id=?",
+                    (upcoming, status, now, job.id),
+                )
+                job.next_run, job.status, job.running = upcoming, status, 1
+                claimed.append(job)
+        return claimed
+
+    def finish_job(self, identifier, status):
+        with self.db:
+            self.db.execute(
+                "UPDATE jobs SET running=0,last_status=? WHERE instance=? AND id=?",
+                (status, self.instance, identifier),
+            )
+
+    def cancel_job(self, identifier):
+        with self.db:
+            changed = self.db.execute(
+                "UPDATE jobs SET status='cancelled',next_run=NULL "
+                "WHERE instance=? AND id=? AND status='active'",
+                (self.instance, identifier),
+            ).rowcount
+        if not changed:
+            raise ValueError("No active job with that number")
 
     def update_bot(self, identifier, role, instructions):
         with self.db:
@@ -255,6 +373,9 @@ class Store:
                     ).fetchone()[0]
                     control = (text.split(maxsplit=1) or [""])[0].split("@")[0] in (
                         "/bot",
+                        "/jobs",
+                        "/schedule",
+                        "/unschedule",
                         "/stop",
                         "/status",
                         "/help",
