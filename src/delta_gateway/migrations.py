@@ -1,9 +1,38 @@
 "Transactional topic-aware schema migration. Call only with the gateway stopped."
 
-SCHEMA = 4
+SCHEMA = 5
 
 
 def migrate(db, version):
+    if version < 4:
+        migrate_to_four(db, version)
+    elif version > SCHEMA:
+        raise ValueError("Unsupported database schema")
+    if version < 5:
+        migrate_to_five(db)
+
+
+def migrate_to_five(db):
+    try:
+        db.executescript("""
+        BEGIN IMMEDIATE;
+        CREATE TABLE bots(id TEXT PRIMARY KEY,instance TEXT NOT NULL,name TEXT NOT NULL,
+          name_key TEXT NOT NULL,role TEXT NOT NULL,instructions TEXT NOT NULL DEFAULT '',
+          chief INTEGER NOT NULL DEFAULT 0,created REAL NOT NULL,UNIQUE(instance,name_key));
+        CREATE UNIQUE INDEX one_chief ON bots(instance) WHERE chief=1;
+        ALTER TABLE routes ADD COLUMN bot TEXT;
+        CREATE TABLE route_bots(route INTEGER NOT NULL,bot TEXT NOT NULL,session TEXT,
+          session_file TEXT,title TEXT,provider TEXT,model TEXT,thinking TEXT,
+          PRIMARY KEY(route,bot));
+        PRAGMA user_version=5;
+        COMMIT;
+        """)
+    except BaseException:
+        db.rollback()
+        raise
+
+
+def migrate_to_four(db, version):
     base = """
     CREATE TABLE IF NOT EXISTS instances(id TEXT PRIMARY KEY, bot_id INTEGER);
     CREATE TABLE IF NOT EXISTS poll_state(instance TEXT PRIMARY KEY, offset INTEGER NOT NULL);
@@ -43,8 +72,6 @@ def migrate(db, version):
         """
     elif version == 3:
         changes = ""
-    elif version == SCHEMA:
-        return
     else:
         raise ValueError("Unsupported database schema")
     seed = """

@@ -17,6 +17,7 @@ from delta_gateway.telegram import TelegramError, chunks
 from delta_gateway.version_check import status as version_status
 
 HELP = (
+    "/bot [name] /bot new <name> | <purpose>\n"
     "/status /new /name <name> /sessions /switch <id> /clone\n"
     "/compact [instructions] /export /last /stop\n"
     "/models /model <provider/model-id> /thinking <level>\n"
@@ -296,6 +297,7 @@ class Service:
                 )
                 model = state.get("model") or {}
                 reply = (
+                    f"Bot: {self.store.bot(route.bot).name}\n"
                     f"Session: {state.get('sessionName') or '(unnamed)'}\n"
                     f"ID: {state.get('sessionId')}\nFile: {state.get('sessionFile')}\n"
                     f"Model: {model.get('provider')}/{model.get('id')}\n"
@@ -334,6 +336,26 @@ class Service:
                     else "Invalid command or local configuration. Use /help.",
                 )
 
+    async def bot_command(self, route, argument):
+        route = self.store.conversation(*route.key)
+        if not argument:
+            lines = [
+                f"{'*' if bot.id == route.bot else ' '} {bot.name}: {bot.role[:200]}"
+                for bot in self.store.bots()
+            ]
+            return "\n".join(["Bots:", *lines, "Use /bot <name> to switch."])
+        action, _, rest = argument.partition(" ")
+        if action == "new":
+            name, separator, role = rest.partition("|")
+            if not separator:
+                raise ValueError("Use /bot new <name> | <purpose>")
+            return f"Created {self.store.create_bot(name, role).name}."
+        bot = self.store.find_bot(argument)
+        if not bot:
+            raise ValueError("No bot with that name. Use /bot to list them.")
+        await self.sessions.switch_bot(route, bot)
+        return f"Now talking to {bot.name}."
+
     async def control(self, item):
         route = self.store.conversation(*item.key)
         started = False
@@ -346,7 +368,10 @@ class Service:
         try:
             async with self.slots:
                 command, argument = split(item.text)
-                if command == "/switch":
+                if command == "/bot":
+                    before_send()
+                    reply = await self.bot_command(route, argument)
+                elif command == "/switch":
                     target = self.store.get_route(int(argument))
                     if not target or target.user not in {0, item.actor}:
                         raise ValueError("Unknown conversation or another user's session")
@@ -482,6 +507,7 @@ class Service:
                         )
                 elif is_command:
                     if command not in {
+                        "/bot",
                         "/new",
                         "/clone",
                         "/name",
@@ -526,6 +552,7 @@ class Service:
                     {"command": name, "description": description}
                     for name, description in (
                         ("help", "Show help"),
+                        ("bot", "List or switch bots"),
                         ("status", "Current Delta session"),
                         ("new", "Start a fresh session"),
                         ("name", "Name this session"),

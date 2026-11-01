@@ -4,6 +4,7 @@ import asyncio
 import time
 from pathlib import Path
 
+from delta_gateway.bots import prepare
 from delta_gateway.errors import RequestRejected, WorkerLost
 from delta_gateway.rpc_client import RpcClient
 
@@ -44,7 +45,7 @@ class SessionManager:
                     if old not in self.busy:
                         await self.clients.pop(old).close()
                         break
-            config = self.config.model_copy(deep=True)
+            config = prepare(self.config, self.store.bot(current.bot))
             if current.provider:
                 config.provider = current.provider
             if current.model:
@@ -216,6 +217,10 @@ class SessionManager:
                 ):
                     await self.clients.pop(old).close()
             return route
+
+    async def switch_bot(self, route, bot):
+        async with self.lock_for(route):
+            return self.store.switch_bot(route, bot)
 
     async def cleanup(self):
         now = time.monotonic()

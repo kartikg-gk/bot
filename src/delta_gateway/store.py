@@ -5,7 +5,9 @@ import sqlite3
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from uuid import uuid4
 
+from delta_gateway.bots import Bot
 from delta_gateway.migrations import SCHEMA, migrate
 from delta_gateway.routing import admit_message
 
@@ -25,6 +27,7 @@ class Conversation:
     thinking: str | None
     created: float
     updated: float
+    bot: str | None = None
 
     @property
     def key(self):
@@ -109,6 +112,88 @@ class Store:
             )
 
         self.seed_routes(directory / "sessions")
+        self.ensure_chief()
+
+    def ensure_chief(self):
+        with self.db:
+            if not self.db.execute(
+                "SELECT 1 FROM bots WHERE instance=? AND chief=1", (self.instance,)
+            ).fetchone():
+                self.db.execute(
+                    "INSERT INTO bots(id,instance,name,name_key,role,chief,created) "
+                    "VALUES(?,?,?,?,?,1,?)",
+                    (
+                        uuid4().hex,
+                        self.instance,
+                        "Chief of Staff",
+                        "chief of staff",
+                        "The user's primary bot.",
+                        time.time(),
+                    ),
+                )
+
+    def bots(self):
+        return [
+            Bot(row[0], row[1], row[2], row[3], bool(row[4]))
+            for row in self.db.execute(
+                "SELECT id,name,role,instructions,chief FROM bots WHERE instance=? "
+                "ORDER BY chief DESC,created",
+                (self.instance,),
+            ).fetchall()
+        ]
+
+    def bot(self, identifier):
+        return next((bot for bot in self.bots() if bot.id == identifier), None)
+
+    def find_bot(self, name):
+        key = name.strip().casefold()
+        return next((bot for bot in self.bots() if bot.name.casefold() == key), None)
+
+    def create_bot(self, name, role, instructions=""):
+        name, role = name.strip(), role.strip()
+        if not name or not role:
+            raise ValueError("A bot needs a name and a purpose")
+        if self.find_bot(name):
+            raise ValueError(f"A bot named {name} already exists")
+        identifier = uuid4().hex
+        with self.db:
+            self.db.execute(
+                "INSERT INTO bots(id,instance,name,name_key,role,instructions,created) "
+                "VALUES(?,?,?,?,?,?,?)",
+                (identifier, self.instance, name, name.casefold(), role, instructions, time.time()),
+            )
+        return self.bot(identifier)
+
+    def switch_bot(self, route, bot):
+        """Keep each bot's session on this route so switching back resumes it."""
+        fields = "session,session_file,title,provider,model,thinking"
+        route = self.get_route(route.id)
+        with self.db:
+            self.db.execute(
+                f"INSERT OR REPLACE INTO route_bots(route,bot,{fields}) VALUES(?,?,?,?,?,?,?,?)",
+                (
+                    route.id,
+                    route.bot,
+                    route.session,
+                    route.session_file,
+                    route.title,
+                    route.provider,
+                    route.model,
+                    route.thinking,
+                ),
+            )
+            saved = (
+                self.db.execute(
+                    f"SELECT {fields} FROM route_bots WHERE route=? AND bot=?", (route.id, bot.id)
+                ).fetchone()
+                or (None,) * 6
+            )
+            self.db.execute(
+                "UPDATE routes SET bot=?,session=?,session_file=?,title=?,provider=?,model=?,"
+                "thinking=?,updated=? WHERE instance=? AND id=?",
+                (bot.id, *saved, time.time(), self.instance, route.id),
+            )
+        return self.get_route(route.id)
 
     def bind_bot(self, bot_id):
         old = self.db.execute(
@@ -139,6 +224,7 @@ class Store:
                         (self.instance, chat, route_user, thread),
                     ).fetchone()[0]
                     control = (text.split(maxsplit=1) or [""])[0].split("@")[0] in (
+                        "/bot",
                         "/stop",
                         "/status",
                         "/help",
@@ -356,6 +442,11 @@ class Store:
             ),
             (self.instance, chat, user, thread, time.time(), time.time()),
         )
+        self.db.execute(
+            "UPDATE routes SET bot=(SELECT id FROM bots WHERE instance=? AND chief=1) "
+            "WHERE instance=? AND chat=? AND user=? AND thread=? AND bot IS NULL",
+            (self.instance, self.instance, chat, user, thread),
+        )
         row = self.db.execute(
             "SELECT * FROM routes WHERE instance=? AND chat=? AND user=? AND thread=?",
             (self.instance, chat, user, thread),
@@ -466,7 +557,7 @@ class Store:
             self.db.execute(
                 (
                     "UPDATE routes SET session=?,session_file=?,title=?,provider=?,mode"
-                    "l=?,thinking=?,updated=? WHERE instance=? AND id=?"
+                    "l=?,thinking=?,bot=?,updated=? WHERE instance=? AND id=?"
                 ),
                 (
                     source.session,
@@ -475,6 +566,7 @@ class Store:
                     source.provider,
                     source.model,
                     source.thinking,
+                    source.bot,
                     time.time(),
                     self.instance,
                     route.id,
