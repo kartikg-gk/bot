@@ -284,3 +284,38 @@ async def test_build_session_selects_provider_credentials_before_engine(tmp_path
     )
     await build_session(SimpleNamespace(provider="openrouter", session=None, trust_project=False))
     assert seen == {"key": "fake-router-key", "url": "https://openrouter.ai/api/v1"}
+
+
+@pytest.mark.parametrize("command", ["queue", "steer"])
+async def test_queue_and_steer_reach_an_active_run(tmp_path, command):
+    c = config(tmp_path)
+    bot = Bot()
+    service = Service(c, bot, factory="tests.fake_session:create")
+    try:
+        service.store.admit([update(1, "slow")], c)
+        await service.dispatch()
+        async with asyncio.timeout(10):
+            while service.store.db.execute("SELECT status FROM inbox WHERE id=1").fetchone()[0] != "running":
+                await asyncio.sleep(0.01)
+        service.store.admit([update(2, f"/{command} more")], c)
+        await service.dispatch()
+        assert service.store.db.execute("SELECT status FROM inbox WHERE id=2").fetchone()[0] == "completed"
+        assert any("active run" in text for _, text, _ in bot.sent)
+        client = next(iter(service.sessions.clients.values()))
+        assert (await client.request("get_state"))["pendingMessageCount"] == 1
+    finally:
+        await service.close()
+
+
+async def test_steer_when_idle_runs_as_a_prompt(tmp_path):
+    c = config(tmp_path)
+    bot = Bot()
+    service = Service(c, bot, factory="tests.fake_session:create")
+    try:
+        service.store.admit([update(1, "/steer hello")], c)
+        await service.dispatch()
+        await settle(service)
+        assert service.store.db.execute("SELECT status FROM inbox WHERE id=1").fetchone()[0] == "completed"
+        assert not any("active run" in text for _, text, _ in bot.sent)
+    finally:
+        await service.close()

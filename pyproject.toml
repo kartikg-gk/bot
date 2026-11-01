@@ -3,7 +3,7 @@ name = "delta-gateway"
 version = "0.1.0"
 description = "A subprocess gateway for persistent Delta sessions"
 requires-python = ">=3.12"
-dependencies = ["deltaa>=0.2.2", "pydantic>=2.7", "httpx>=0.27", "python-telegram-bot>=22.7,<23", "PyYAML>=6", "prompt-toolkit>=3", "packaging>=24"]
+dependencies = ["deltaa>=0.3.0", "pydantic>=2.7", "httpx>=0.27", "python-telegram-bot>=22.7,<23", "PyYAML>=6", "prompt-toolkit>=3", "packaging>=24"]
 
 [project.scripts]
 delta-gateway = "delta_gateway.cli:main"

@@ -167,7 +167,7 @@ def test_yaml_defaults_secrets_and_legacy_migration(tmp_path, monkeypatch):
     restored = load(path)
     assert restored.per_user_groups is False and restored.group_mentions_only is False
     assert restored.workers is None and restored.retention_days is None
-    assert restored.policy == "engine"
+    assert restored.policy == "ask"
     assert "private-fake-value" not in repr(restored)
     assert restored.token() == "12345:private-fake-value"
     monkeypatch.setenv(restored.token_env, "environment-wins")

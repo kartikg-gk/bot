@@ -224,6 +224,25 @@ class Service:
             await preview.finish()
             self.previews.pop(item.key, None)
 
+    async def forward(self, item, command, argument):
+        route = self.store.conversation(*item.key)
+        status = item.status
+        self.store.mark(item.id, "dispatching")
+        try:
+            delivered = await self.sessions.forward(route, command[1:], argument)
+        except (RuntimeError, OSError):
+            self.store.mark(item.id, "uncertain")
+            with contextlib.suppress(TelegramError):
+                await self.notify(item.key, "Delivery uncertain. It was not replayed. Check /status.")
+            return True
+        if not delivered:
+            self.store.mark(item.id, status)
+            return False
+        self.store.mark(item.id, "completed")
+        with contextlib.suppress(TelegramError):
+            await self.reply(route, "Queued for the active run." if command == "/queue" else "Sent to the active run.")
+        return True
+
     async def last(self, key):
         route = self.store.conversation(*key)
         result, _ = await self.sessions.control(route, "get_last_assistant_text")
@@ -441,6 +460,8 @@ class Service:
                         self.store.mark(item.id, "failed")
                         with contextlib.suppress(TelegramError):
                             await self.notify(item.key, f"Use {command} <text>")
+                    elif command != "/delta" and await self.forward(item, command, argument):
+                        pass
                     elif item.key not in self.jobs:
                         self.store.replace_prompt(item.id, argument)
                         item.text, item.status = argument, "prompt"

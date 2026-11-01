@@ -38,7 +38,7 @@ class Config(BaseModel):
     backlog: int | None = Field(default=None, ge=1, le=10000)
     idle_seconds: int = Field(default=1800, ge=1)
     trust_project: bool = False
-    policy: str = Field(default="engine", pattern=r"^(engine|ask|deny|auto)$")
+    policy: str = Field(default="ask", pattern=r"^(engine|ask|deny|auto)$")
     approval_seconds: int = Field(default=300, ge=1, le=3600)
     name: str | None = Field(default=None, pattern=r"^[A-Za-z0-9][A-Za-z0-9-]{0,63}$")
     token_env: str = Field(default="TELEGRAM_BOT_TOKEN", pattern=r"^[A-Z][A-Z0-9_]*$")
@@ -214,7 +214,7 @@ def load(path, *, require_project=True):
             engine_args=d.get("extraArgs", []),
             idle_seconds=d.get("idleSeconds", 1800),
             trust_project=d.get("trustProject", False),
-            policy=d.get("toolPolicy", "engine"),
+            policy=d.get("toolPolicy", "ask"),
             approval_seconds=d.get("approvalSeconds", 300),
             token_env=t.get("tokenEnvironment", "TELEGRAM_BOT_TOKEN"),
             bot_token=t.get("botToken"),

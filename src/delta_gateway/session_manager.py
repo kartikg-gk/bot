@@ -4,7 +4,7 @@ import asyncio
 import time
 from pathlib import Path
 
-from delta_gateway.client import WorkerLost
+from delta_gateway.client import RequestRejected, WorkerLost
 from delta_gateway.rpc_client import RpcClient
 
 
@@ -141,6 +141,18 @@ class SessionManager:
             self.busy.discard(self.identity(current))
             self.touched[self.identity(current)] = time.monotonic()
             lock.release()
+
+    async def forward(self, route, command, text):
+        """Deliver to a running prompt; False means nothing was delivered."""
+        identity = self.identity(self.store.get_route(route.id))
+        client = self.clients.get(identity)
+        if identity not in self.busy or not client or client.failure:
+            return False
+        try:
+            await client.request(command, message=text, requireActive=True)
+        except RequestRejected:
+            return False
+        return True
 
     async def control(self, route, command, *, before_send=None, **arguments):
         route = self.store.get_route(route.id)
