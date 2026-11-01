@@ -162,3 +162,75 @@ async def test_session_resumes_in_a_new_container(tmp_path):
         assert resumed["sessionId"] == state["sessionId"]
     finally:
         await proxy.close()
+
+
+async def test_chief_tool_call_crosses_the_container_boundary(tmp_path):
+    def reply(request):
+        if b'"role": "tool"' in request.content or b'"role":"tool"' in request.content:
+            return model_reply(request, [])
+        call = dict(
+            index=0,
+            id="call-1",
+            type="function",
+            function=dict(name="list_bots", arguments="{}"),
+        )
+        chunk = dict(
+            id="c",
+            object="chat.completion.chunk",
+            model="fake",
+            choices=[dict(index=0, delta=dict(role="assistant", tool_calls=[call]))],
+        )
+        end = dict(
+            id="c",
+            object="chat.completion.chunk",
+            model="fake",
+            choices=[dict(index=0, delta={}, finish_reason="tool_calls")],
+        )
+        return httpx.Response(
+            200, text=sse(chunk, end), headers={"content-type": "text/event-stream"}
+        )
+
+    proxy = ModelProxy(
+        resolve=lambda _: Upstream("https://provider.test/v1", REAL_KEY),
+        transport=httpx.MockTransport(reply),
+    )
+    await proxy.start()
+    c = config(
+        tmp_path, executor="docker", docker_image=IMAGE, provider="openai", model="m", policy="ask"
+    )
+    bot = Profile("b" * 32, "Chief of Staff", "Runs the team", "", True)
+    prepared = prepare(c, bot)
+    prepared.sessions_path.mkdir(parents=True, exist_ok=True)
+    launch = docker_launch(
+        prepared, bot, None, proxy.issue("openai", 5), proxy.port, key_env="OPENAI_API_KEY"
+    )
+    client = RpcClient(
+        prepared,
+        command=launch.command,
+        environment=launch.environment,
+        paths=launch.paths,
+        timeout=60,
+    )
+    try:
+        async with client:
+            await client.request("prompt", message="who is on the team?")
+            kinds = []
+            async with asyncio.timeout(60):
+                while True:
+                    event = await client.next_event()
+                    kinds.append(event.get("type"))
+                    if event.get("type") == "host_tool_call":
+                        assert event["name"] == "list_bots"
+                        await client.request(
+                            "respond_to_host_tool",
+                            callId=event["callId"],
+                            output="[]",
+                            isError=False,
+                        )
+                    if event.get("type") == "agent_settled":
+                        break
+            assert "host_tool_call" in kinds and "approval_requested" not in kinds
+            assert event["outcome"] == "completed"
+            assert (await client.request("get_last_assistant_text"))["text"] == "from the fake"
+    finally:
+        await proxy.close()

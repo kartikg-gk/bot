@@ -13,6 +13,7 @@ from delta_gateway.previews import Preview, typing
 from delta_gateway.routing import payload
 from delta_gateway.session_manager import SessionManager
 from delta_gateway.store import Store
+from delta_gateway.team import Team
 from delta_gateway.telegram import TelegramError, chunks
 from delta_gateway.version_check import status as version_status
 
@@ -33,6 +34,7 @@ class Service:
         )
         self.store.activate()
         self.sessions = SessionManager(config, self.store, factory=factory)
+        self.team = Team(self.store, self.sessions)
         self.jobs, self.cards, self.previews = {}, {}, {}
         self.slots = asyncio.Semaphore(config.workers or 2**30)
         self.dispatch_lock = asyncio.Lock()
@@ -162,8 +164,48 @@ class Service:
             started = True
             self.store.mark(item.id, "dispatching")
 
+        host_calls = set()
+
+        async def approvals(client, record):
+            kind = record.get("type")
+            if kind == "approval_requested":
+                await self.card(item.key, client, record, actor=item.actor)
+            elif kind == "approval_resolved":
+                for handle, card in list(self.cards.items()):
+                    if card["event"]["approval_id"] == record["approvalId"]:
+                        await self.resolve_card(handle, record["allow"], "worker")
+
+        async def delegated(bot, client, record):
+            if record.get("type") == "tool_execution_start":
+                await preview.update(f"{bot.name}: working")
+            await approvals(client, record)
+
+        async def host_call(client, record):
+            output, failed = "", False
+            try:
+                if not self.store.bot(self.store.get_route(route.id).bot).chief:
+                    raise ValueError("Only the chief of staff can use this tool.")
+                output = await self.team.run(
+                    record["name"], record.get("arguments", {}), route, delegated
+                )
+            except (ValueError, RuntimeError, OSError, KeyError) as exc:
+                output = str(exc) if isinstance(exc, ValueError) else "The task failed."
+                failed = True
+            with contextlib.suppress(RuntimeError):
+                await client.request(
+                    "respond_to_host_tool", callId=record["callId"], output=output, isError=failed
+                )
+
         async def event(record, partial):
             kind = record.get("type")
+            if kind == "host_tool_call":
+                client = self.sessions.clients[
+                    self.sessions.identity(self.store.get_route(route.id))
+                ]
+                call = asyncio.create_task(host_call(client, record))
+                host_calls.add(call)
+                call.add_done_callback(host_calls.discard)
+                return
             if kind in {"agent_start", "message_start", "message_update"}:
                 await preview.update(partial)
             elif kind in {"tool_execution_start", "tool_execution_end"}:
@@ -171,15 +213,11 @@ class Service:
                     c for c in record.get("toolName", "")[:60] if c.isalnum() or c in "_-"
                 )
                 await preview.update("Tool: " + name if kind.endswith("start") else partial)
-            elif kind == "approval_requested":
+            elif kind in {"approval_requested", "approval_resolved"}:
                 client = self.sessions.clients[
                     self.sessions.identity(self.store.get_route(route.id))
                 ]
-                await self.card(item.key, client, record, actor=item.actor)
-            elif kind == "approval_resolved":
-                for handle, card in list(self.cards.items()):
-                    if card["event"]["approval_id"] == record["approvalId"]:
-                        await self.resolve_card(handle, record["allow"], "worker")
+                await approvals(client, record)
 
         try:
             async with self.slots:
@@ -217,6 +255,9 @@ class Service:
                     "Task interrupted or could not start. It was not replayed. Check /status.",
                 )
         finally:
+            for call in list(host_calls):
+                call.cancel()
+            await asyncio.gather(*host_calls, return_exceptions=True)
             activity.cancel()
             await asyncio.gather(activity, return_exceptions=True)
             for handle, card in list(self.cards.items()):

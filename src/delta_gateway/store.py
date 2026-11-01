@@ -106,6 +106,11 @@ class Store:
                 (instance,),
             )
             self.db.execute(
+                "UPDATE delegations SET status='interrupted',finished=? "
+                "WHERE instance=? AND status='running'",
+                (time.time(), instance),
+            )
+            self.db.execute(
                 "UPDATE approvals SET decision='denied',source='restart' "
                 "WHERE instance=? AND decision IS NULL",
                 (instance,),
@@ -163,6 +168,31 @@ class Store:
                 (identifier, self.instance, name, name.casefold(), role, instructions, time.time()),
             )
         return self.bot(identifier)
+
+    def update_bot(self, identifier, role, instructions):
+        with self.db:
+            self.db.execute(
+                "UPDATE bots SET role=?,instructions=? WHERE instance=? AND id=?",
+                (role, instructions, self.instance, identifier),
+            )
+
+    def begin_delegation(self, route, bot, task):
+        try:
+            with self.db:
+                return self.db.execute(
+                    "INSERT INTO delegations(instance,route,bot,task,status,created) "
+                    "VALUES(?,?,?,?,'running',?)",
+                    (self.instance, route, bot.id, task, time.time()),
+                ).lastrowid
+        except sqlite3.IntegrityError:
+            raise ValueError(f"{bot.name} is busy with another task.") from None
+
+    def finish_delegation(self, identifier, status, answer):
+        with self.db:
+            self.db.execute(
+                "UPDATE delegations SET status=?,answer=?,finished=? WHERE instance=? AND id=?",
+                (status, answer, time.time(), self.instance, identifier),
+            )
 
     def switch_bot(self, route, bot):
         """Keep each bot's session on this route so switching back resumes it."""

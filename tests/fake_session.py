@@ -31,6 +31,27 @@ class Provider:
                 ),
             )
             return
+        if prompt.startswith("delegate:") and isinstance(messages[-1], HumanEntry):
+            _, bot, task = prompt.split(":", 2)
+            yield StreamCloseEvent(
+                reason="toolUse",
+                message=ModelEntry(
+                    model=model,
+                    stop_reason="toolUse",
+                    content=[
+                        CallBlock(
+                            id="delegate-1",
+                            name="delegate_task",
+                            arguments={"bot_name": bot, "task": task},
+                        )
+                    ],
+                ),
+            )
+            return
+        if prompt.startswith("delegate:"):
+            text = "delegated"
+            yield StreamCloseEvent(reason="stop", message=ModelEntry(model=model, content=text))
+            return
         if prompt == "fail":
             raise RuntimeError("secret-that-must-not-appear-in-the-protocol")
         text = f"turn {count}: "
@@ -60,7 +81,7 @@ async def create(options):
         model="fake",
         system="",
         sessions_dir=Path(options.session_dir),
-        tools=[make_write_tool()],
+        tools=[make_write_tool(), *(getattr(options, "host_tools", None) or [])],
     )
     if options.session:
         session = await CodingSession.resume(options.session, **kwargs)

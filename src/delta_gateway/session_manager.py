@@ -11,6 +11,13 @@ from delta_gateway.proxy import ModelProxy
 from delta_gateway.rpc_client import RpcClient
 
 
+def assistant_text(message):
+    content = message.get("content", [])
+    if isinstance(content, str):
+        return content
+    return "".join(block.get("text", "") for block in content if block.get("type") == "text")
+
+
 class SessionManager:
     def __init__(self, config, store, *, factory=None):
         self.config, self.store, self.factory = config, store, factory
@@ -96,6 +103,31 @@ class SessionManager:
             self.touched[self.identity(current)] = time.monotonic()
             return client
 
+    async def delegate(self, bot, task, event=None):
+        """Run a task as another bot in a fresh session, and return its answer."""
+        config = prepare(self.config, bot)
+        sandbox = (
+            await self.sandbox_options(config, bot, None) if config.executor == "docker" else {}
+        )
+        client = RpcClient(
+            config, None, factory=self.factory, grace=self.config.shutdown_timeout, **sandbox
+        )
+        try:
+            await client.start()
+            await client.request("prompt", message=task)
+            final = ""
+            while True:
+                item = await client.next_event()
+                kind = item.get("type")
+                if kind == "message_end" and item.get("message", {}).get("role") == "assistant":
+                    final = assistant_text(item["message"]) or final
+                if kind == "agent_settled":
+                    return final or item.get("error", ""), item.get("outcome", "completed")
+                if event:
+                    await event(client, item)
+        finally:
+            await client.close()
+
     async def persist(self, route, client):
         state = await client.request("get_state")
         self.store.persist_route(route, state)
@@ -142,17 +174,7 @@ class SessionManager:
                     if delta.get("type") == "text_delta":
                         preview = (preview + delta.get("delta", ""))[:4096]
                 elif kind == "message_end" and item.get("message", {}).get("role") == "assistant":
-                    content = item["message"].get("content", [])
-                    text = (
-                        content
-                        if isinstance(content, str)
-                        else "".join(
-                            block.get("text", "")
-                            for block in content
-                            if block.get("type") == "text"
-                        )
-                    )
-                    final = text or final
+                    final = assistant_text(item["message"]) or final
                 if event:
                     await event(item, preview)
                 if kind == "agent_settled":

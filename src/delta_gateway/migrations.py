@@ -1,6 +1,6 @@
 "Transactional topic-aware schema migration. Call only with the gateway stopped."
 
-SCHEMA = 5
+SCHEMA = 6
 
 
 def migrate(db, version):
@@ -10,6 +10,25 @@ def migrate(db, version):
         raise ValueError("Unsupported database schema")
     if version < 5:
         migrate_to_five(db)
+    if version < 6:
+        migrate_to_six(db)
+
+
+def migrate_to_six(db):
+    try:
+        db.executescript("""
+        BEGIN IMMEDIATE;
+        CREATE TABLE delegations(id INTEGER PRIMARY KEY AUTOINCREMENT,instance TEXT NOT NULL,
+          route INTEGER NOT NULL,bot TEXT NOT NULL,task TEXT NOT NULL,status TEXT NOT NULL,
+          answer TEXT,created REAL NOT NULL,finished REAL);
+        CREATE UNIQUE INDEX one_task_per_bot ON delegations(instance,bot)
+          WHERE status='running';
+        PRAGMA user_version=6;
+        COMMIT;
+        """)
+    except BaseException:
+        db.rollback()
+        raise
 
 
 def migrate_to_five(db):
