@@ -6,6 +6,8 @@ from pathlib import Path
 
 from delta_gateway.bots import prepare
 from delta_gateway.errors import RequestRejected, WorkerLost
+from delta_gateway.executor import docker_launch
+from delta_gateway.proxy import ModelProxy
 from delta_gateway.rpc_client import RpcClient
 
 
@@ -17,6 +19,7 @@ class SessionManager:
         self.touched = {}
         self.busy = set()
         self.creation = asyncio.Lock()
+        self.proxy = None
 
     def identity(self, route):
         return (
@@ -25,6 +28,21 @@ class SessionManager:
 
     def lock_for(self, route):
         return self.locks.setdefault(self.identity(route), asyncio.Lock())
+
+    async def sandbox_options(self, config, bot, session):
+        if not self.proxy:
+            self.proxy = ModelProxy(host=self.config.proxy_host, port=self.config.proxy_port)
+        await self.proxy.start()
+        if not config.provider:
+            raise WorkerLost("Set a default provider for sandboxed bots")
+        token = self.proxy.issue(config.provider, self.config.max_model_requests)
+        launch = docker_launch(config, bot, session, token, self.proxy.port)
+        return dict(
+            command=launch.command,
+            environment=launch.environment,
+            paths=launch.paths,
+            on_close=lambda: self.proxy.revoke(token),
+        )
 
     async def client_for(self, route, *, fresh_if_missing=False):
         async with self.creation:
@@ -45,18 +63,25 @@ class SessionManager:
                     if old not in self.busy:
                         await self.clients.pop(old).close()
                         break
-            config = prepare(self.config, self.store.bot(current.bot))
+            bot = self.store.bot(current.bot)
+            config = prepare(self.config, bot)
             if current.provider:
                 config.provider = current.provider
             if current.model:
                 config.model = current.model
             if current.thinking:
                 config.thinking = current.thinking
+            sandbox = (
+                await self.sandbox_options(config, bot, current.session_file)
+                if config.executor == "docker"
+                else {}
+            )
             client = RpcClient(
                 config,
                 current.session_file,
                 factory=self.factory,
                 grace=self.config.shutdown_timeout,
+                **sandbox,
             )
             try:
                 await client.start()
@@ -237,3 +262,5 @@ class SessionManager:
             *(client.close() for client in self.clients.values()), return_exceptions=True
         )
         self.clients.clear()
+        if self.proxy:
+            await self.proxy.close()

@@ -70,9 +70,23 @@ def engine_command(config, session=None, *, factory=None):
 
 
 class RpcClient:
-    def __init__(self, config, session=None, *, factory=None, timeout=30, grace=10):
+    def __init__(
+        self,
+        config,
+        session=None,
+        *,
+        factory=None,
+        timeout=30,
+        grace=10,
+        command=None,
+        environment=None,
+        paths=(),
+        on_close=None,
+    ):
         self.config, self.timeout, self.grace = config, timeout, grace
-        self.command = engine_command(config, session, factory=factory)
+        self.command = command or engine_command(config, session, factory=factory)
+        self.environment = environment or {}
+        self.paths, self.on_close = list(paths), on_close
         self.process = self.reader = self.stderr_reader = None
         self.pending = {}
         self.events = asyncio.Queue()
@@ -119,7 +133,10 @@ class RpcClient:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 limit=LIMIT,
-                env={k: v for k, v in os.environ.items() if k not in private},
+                env={
+                    **{k: v for k, v in os.environ.items() if k not in private},
+                    **self.environment,
+                },
             )
             self.reader = asyncio.create_task(self.read())
             self.stderr_reader = asyncio.create_task(self.read_stderr())
@@ -148,6 +165,21 @@ class RpcClient:
             await self.close()
             raise
 
+    def translate(self, value):
+        """Rewrite file paths reported from inside a sandbox to their host locations."""
+        if isinstance(value, list):
+            for item in value:
+                self.translate(item)
+        elif isinstance(value, dict):
+            for key, item in value.items():
+                if key in {"sessionFile", "path"} and isinstance(item, str):
+                    for inner, outer in self.paths:
+                        if item == inner or item.startswith(inner + "/"):
+                            value[key] = outer + item[len(inner) :]
+                            break
+                else:
+                    self.translate(item)
+
     def fail(self):
         if not self.failure:
             self.failure = WorkerLost("Delta RPC connection closed; work was not replayed")
@@ -164,6 +196,8 @@ class RpcClient:
                 record = __import__("json").loads(line.decode("utf-8"))
                 if not isinstance(record, dict):
                     raise ValueError("Invalid engine record")
+                if self.paths:
+                    self.translate(record)
                 if record.get("type") == "response":
                     future = self.pending.get(record.get("id"))
                     if future and not future.done():
@@ -253,6 +287,9 @@ class RpcClient:
                 await self.process.wait()
 
     async def close(self):
+        if self.on_close:
+            self.on_close()
+            self.on_close = None
         if not self.process:
             return
         if self.process.returncode is None:

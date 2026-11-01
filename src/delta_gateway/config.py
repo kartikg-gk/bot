@@ -51,6 +51,13 @@ class Config(BaseModel):
     retention_days: int | None = Field(default=None, ge=1)
     shutdown_timeout: float = Field(default=10, gt=0, le=300)
     release_url: str | None = None
+    executor: str = Field(default="local", pattern=r"^(local|docker)$")
+    docker_image: str | None = None
+    docker_network: str = "bridge"
+    docker_memory: str = "2g"
+    proxy_host: str = "127.0.0.1"
+    proxy_port: int = Field(default=0, ge=0, le=65535)
+    max_model_requests: int = Field(default=500, ge=1)
 
     @property
     def database_path(self):
@@ -81,6 +88,8 @@ class Config(BaseModel):
             raise ValueError("Agent directory must be absolute")
         if any(not isinstance(arg, str) or not arg or "\x00" in arg for arg in self.engine_command):
             raise ValueError("Engine command must contain nonempty arguments")
+        if self.executor == "docker" and not self.docker_image:
+            raise ValueError("The docker executor needs a container image")
         if self.release_url:
             from urllib.parse import urlparse
 
@@ -124,6 +133,13 @@ def document(config):
             trustProject=config.trust_project,
             toolPolicy=config.policy,
             approvalSeconds=config.approval_seconds,
+            executor=config.executor,
+            dockerImage=config.docker_image,
+            dockerNetwork=config.docker_network,
+            dockerMemory=config.docker_memory,
+            proxyHost=config.proxy_host,
+            proxyPort=config.proxy_port,
+            maxModelRequests=config.max_model_requests,
         ),
         limits=dict(workers=config.workers, backlog=config.backlog),
         retentionDays=config.retention_days,
@@ -192,6 +208,13 @@ def load(path, *, require_project=True):
                     "trustProject",
                     "toolPolicy",
                     "approvalSeconds",
+                    "executor",
+                    "dockerImage",
+                    "dockerNetwork",
+                    "dockerMemory",
+                    "proxyHost",
+                    "proxyPort",
+                    "maxModelRequests",
                 },
             ),
             (limits, {"workers", "backlog"}),
@@ -216,6 +239,13 @@ def load(path, *, require_project=True):
             trust_project=d.get("trustProject", False),
             policy=d.get("toolPolicy", "ask"),
             approval_seconds=d.get("approvalSeconds", 300),
+            executor=d.get("executor", "local"),
+            docker_image=d.get("dockerImage"),
+            docker_network=d.get("dockerNetwork", "bridge"),
+            docker_memory=d.get("dockerMemory", "2g"),
+            proxy_host=d.get("proxyHost", "127.0.0.1"),
+            proxy_port=d.get("proxyPort", 0),
+            max_model_requests=d.get("maxModelRequests", 500),
             token_env=t.get("tokenEnvironment", "TELEGRAM_BOT_TOKEN"),
             bot_token=t.get("botToken"),
             allow_groups=t.get("allowGroups", False),
