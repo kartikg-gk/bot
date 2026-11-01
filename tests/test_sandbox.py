@@ -74,7 +74,7 @@ async def test_proxy_refuses_path_traversal(proxy):
     token = proxy.issue("openai", 5)
     reader, writer = await asyncio.open_connection("127.0.0.1", proxy.port)
     writer.write(
-        f"POST /../admin/chat/completions HTTP/1.1\r\nAuthorization: Bearer {token}\r\n\r\n".encode()
+        f"POST /../x/chat/completions HTTP/1.1\r\nAuthorization: Bearer {token}\r\n\r\n".encode()
     )
     await writer.drain()
     assert b"403" in await reader.readline()
