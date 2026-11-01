@@ -7,15 +7,6 @@ from delta_gateway.telegram import TelegramError
 from tests.test_gateway import Bot, config, settle, update
 
 
-async def control(client, operation, **arguments):
-    accepted = await client.request(operation, **arguments)
-    events = await finish(client)
-    terminal = events[-1]
-    assert terminal["run_id"] == accepted["run_id"]
-    assert terminal["outcome"] == "completed", terminal
-    return terminal["result"]
-
-
 async def test_preview_failure_does_not_drop_prompt(tmp_path):
     class BrokenPreview(Bot):
         async def call(self, method, **payload):
