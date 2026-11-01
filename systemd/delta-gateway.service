@@ -1,0 +1,19 @@
+[Unit]
+Description=Delta Telegram gateway
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=delta-agent
+WorkingDirectory=/srv/delta-agent/project
+EnvironmentFile=/etc/delta-gateway/research.env
+ExecStart=/opt/delta-gateway/bin/python -m delta_gateway run --config /etc/delta-gateway/research.yaml
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+KillSignal=SIGTERM
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
