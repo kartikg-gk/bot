@@ -3,6 +3,7 @@
 import json
 from dataclasses import dataclass
 
+from delta_gateway.plugins import PLUGINS
 from delta_gateway.team import CHIEF_PROMPT, CHIEF_TOOLS
 
 MEMORY_FILES = ("PREFERENCES.md", "KNOWLEDGE.md")
@@ -48,7 +49,7 @@ def system_addition(config, bot):
     return "\n\n".join(sections)
 
 
-def prepare(config, bot):
+def prepare(config, bot, plugins=()):
     """Return engine settings for this bot, creating its files on first use."""
     root = bot_root(config, bot)
     (root / "memory").mkdir(parents=True, exist_ok=True)
@@ -67,9 +68,12 @@ def prepare(config, bot):
         "--append-system-prompt-file",
         "/bot/system.md" if config.executor == "docker" else str(prompt),
     ]
-    if bot.chief:
+    definitions = list(CHIEF_TOOLS) if bot.chief else []
+    for plugin in plugins:
+        definitions += PLUGINS[plugin].tools
+    if definitions:
         tools = root / "host-tools.json"
-        tools.write_text(json.dumps(CHIEF_TOOLS), encoding="utf-8")
+        tools.write_text(json.dumps(definitions), encoding="utf-8")
         prepared.engine_args += [
             "--host-tools-file",
             "/bot/host-tools.json" if config.executor == "docker" else str(tools),

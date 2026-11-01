@@ -2,6 +2,9 @@
 
 import json
 
+import httpx
+
+from delta_gateway.plugins import PLUGINS, TOOL_OWNERS, PluginRunner
 from delta_gateway.schedule import parse_when
 
 MAX_ANSWER = 20000
@@ -92,8 +95,9 @@ CHIEF_PROMPT = (
 
 
 class Team:
-    def __init__(self, store, sessions):
+    def __init__(self, store, sessions, plugins=None):
         self.store, self.sessions = store, sessions
+        self.plugins = plugins or PluginRunner()
 
     def teammate(self, name):
         bot = self.store.find_bot(name)
@@ -109,7 +113,26 @@ class Team:
             route.chat, route.user, actor, route.thread, bot.id, task, spec, first
         )
 
-    async def run(self, name, arguments, route, event=None, actor=None):
+    async def call_plugin(self, name, arguments, bot):
+        plugin = TOOL_OWNERS[name]
+        if not bot or plugin not in self.store.plugins_for(bot.id):
+            raise ValueError(f"{plugin} is not enabled for this bot.")
+        if not PLUGINS[plugin].configured():
+            raise ValueError(f"{plugin} is not set up on the gateway.")
+        try:
+            return await self.plugins.run(name, arguments)
+        except httpx.HTTPStatusError as exc:
+            raise ValueError(f"{plugin} returned HTTP {exc.response.status_code}.") from None
+        except httpx.HTTPError:
+            raise ValueError(
+                f"Could not reach {plugin}. A write may have gone through; do not retry it."
+            ) from None
+
+    async def run(self, name, arguments, route, event=None, actor=None, bot=None):
+        if name in TOOL_OWNERS:
+            return await self.call_plugin(name, arguments, bot)
+        if bot and not bot.chief:
+            raise ValueError("Only the chief of staff can use this tool.")
         if name == "schedule_job":
             requested = arguments.get("bot_name")
             bot = self.store.find_bot(requested) if requested else self.store.bots()[0]

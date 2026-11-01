@@ -1,6 +1,6 @@
 "Transactional topic-aware schema migration. Call only with the gateway stopped."
 
-SCHEMA = 7
+SCHEMA = 8
 
 
 def migrate(db, version):
@@ -14,6 +14,22 @@ def migrate(db, version):
         migrate_to_six(db)
     if version < 7:
         migrate_to_seven(db)
+    if version < 8:
+        migrate_to_eight(db)
+
+
+def migrate_to_eight(db):
+    try:
+        db.executescript("""
+        BEGIN IMMEDIATE;
+        CREATE TABLE bot_plugins(instance TEXT NOT NULL,bot TEXT NOT NULL,plugin TEXT NOT NULL,
+          PRIMARY KEY(instance,bot,plugin));
+        PRAGMA user_version=8;
+        COMMIT;
+        """)
+    except BaseException:
+        db.rollback()
+        raise
 
 
 def migrate_to_seven(db):

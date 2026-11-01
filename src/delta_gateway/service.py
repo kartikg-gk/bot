@@ -9,6 +9,7 @@ from uuid import uuid4
 
 from delta_gateway.commands import split
 from delta_gateway.errors import RequestRejected, WorkerLost
+from delta_gateway.plugins import PLUGINS
 from delta_gateway.previews import Preview, typing
 from delta_gateway.routing import payload
 from delta_gateway.session_manager import SessionManager
@@ -19,6 +20,7 @@ from delta_gateway.version_check import status as version_status
 
 HELP = (
     "/bot [name] /bot new <name> | <purpose>\n"
+    "/plugins /plugin on|off <name> [bot]\n"
     "/jobs /schedule <when> | [bot] | <task> /unschedule <number>\n"
     "/status /new /name <name> /sessions /switch <id> /clone\n"
     "/compact [instructions] /export /last /stop\n"
@@ -179,26 +181,19 @@ class Service:
                     if card["event"]["approval_id"] == record["approvalId"]:
                         await self.resolve_card(handle, record["allow"], "worker")
 
+        def host_call(client, record, bot):
+            call = asyncio.create_task(
+                self.host_call(client, record, bot, route, item.actor, delegated)
+            )
+            host_calls.add(call)
+            call.add_done_callback(host_calls.discard)
+
         async def delegated(bot, client, record):
+            if record.get("type") == "host_tool_call":
+                return host_call(client, record, bot)
             if record.get("type") == "tool_execution_start":
                 await preview.update(f"{bot.name}: working")
             await approvals(client, record)
-
-        async def host_call(client, record):
-            output, failed = "", False
-            try:
-                if not self.store.bot(self.store.get_route(route.id).bot).chief:
-                    raise ValueError("Only the chief of staff can use this tool.")
-                output = await self.team.run(
-                    record["name"], record.get("arguments", {}), route, delegated, item.actor
-                )
-            except (ValueError, RuntimeError, OSError, KeyError) as exc:
-                output = str(exc) if isinstance(exc, ValueError) else "The task failed."
-                failed = True
-            with contextlib.suppress(RuntimeError):
-                await client.request(
-                    "respond_to_host_tool", callId=record["callId"], output=output, isError=failed
-                )
 
         async def event(record, partial):
             kind = record.get("type")
@@ -206,9 +201,7 @@ class Service:
                 client = self.sessions.clients[
                     self.sessions.identity(self.store.get_route(route.id))
                 ]
-                call = asyncio.create_task(host_call(client, record))
-                host_calls.add(call)
-                call.add_done_callback(host_calls.discard)
+                host_call(client, record, self.store.bot(self.store.get_route(route.id).bot))
                 return
             if kind in {"agent_start", "message_start", "message_update"}:
                 await preview.update(partial)
@@ -381,6 +374,20 @@ class Service:
                     else "Invalid command or local configuration. Use /help.",
                 )
 
+    async def host_call(self, client, record, bot, route, actor, delegated):
+        output, failed = "", False
+        try:
+            output = await self.team.run(
+                record["name"], record.get("arguments", {}), route, delegated, actor, bot
+            )
+        except (ValueError, RuntimeError, OSError, KeyError) as exc:
+            output = str(exc) if isinstance(exc, ValueError) else "The task failed."
+            failed = True
+        with contextlib.suppress(RuntimeError):
+            await client.request(
+                "respond_to_host_tool", callId=record["callId"], output=output, isError=failed
+            )
+
     def run_due(self):
         for job in self.store.claim_due(time.time()):
             task = asyncio.create_task(self.run_job(job))
@@ -403,28 +410,21 @@ class Service:
                     if card["event"]["approval_id"] == record["approvalId"]:
                         await self.resolve_card(handle, record["allow"], "worker")
 
-        async def delegated(_bot, client, record):
+        def host_call(client, record, caller):
+            call = asyncio.create_task(
+                self.host_call(client, record, caller, route, job.actor, delegated)
+            )
+            calls.add(call)
+            call.add_done_callback(calls.discard)
+
+        async def delegated(caller, client, record):
+            if record.get("type") == "host_tool_call":
+                return host_call(client, record, caller)
             await approvals(client, record)
 
-        async def host_call(client, record):
-            output, failed = "", False
-            try:
-                output = await self.team.run(
-                    record["name"], record.get("arguments", {}), route, delegated, job.actor
-                )
-            except (ValueError, RuntimeError, OSError, KeyError) as exc:
-                output = str(exc) if isinstance(exc, ValueError) else "The task failed."
-                failed = True
-            with contextlib.suppress(RuntimeError):
-                await client.request(
-                    "respond_to_host_tool", callId=record["callId"], output=output, isError=failed
-                )
-
         async def event(client, record):
-            if record.get("type") == "host_tool_call" and bot.chief:
-                call = asyncio.create_task(host_call(client, record))
-                calls.add(call)
-                call.add_done_callback(calls.discard)
+            if record.get("type") == "host_tool_call":
+                host_call(client, record, bot)
             else:
                 await approvals(client, record)
 
@@ -482,6 +482,27 @@ class Service:
         identifier = self.team.schedule(pieces[0], pieces[-1], bot, route, actor)
         return f"Scheduled job #{identifier} for {bot.name}."
 
+    async def plugin_command(self, route, command, argument):
+        if command == "/plugins":
+            lines = []
+            for name, plugin in PLUGINS.items():
+                users = [b.name for b in self.store.bots() if name in self.store.plugins_for(b.id)]
+                state = "ready" if plugin.configured() else "not set up"
+                lines.append(f"{name} ({state}): {', '.join(users) or 'no bots'}")
+            return "\n".join(lines)
+        action, name, target = (argument.split(maxsplit=2) + ["", "", ""])[:3]
+        if action not in {"on", "off"} or name not in PLUGINS:
+            raise ValueError("Use /plugin on|off <name> [bot]")
+        current = self.store.conversation(*route.key)
+        bot = self.store.find_bot(target) if target else self.store.bot(current.bot)
+        if not bot:
+            raise ValueError("No bot with that name. Use /bot to list them.")
+        if action == "on" and not PLUGINS[name].configured():
+            raise ValueError(f"{name} is not set up on the gateway.")
+        self.store.set_plugin(bot.id, name, action == "on")
+        await self.sessions.restart_idle()
+        return f"{name} is {action} for {bot.name}. It applies from the bot's next start."
+
     async def bot_command(self, route, argument):
         route = self.store.conversation(*route.key)
         if not argument:
@@ -517,6 +538,9 @@ class Service:
                 if command == "/bot":
                     before_send()
                     reply = await self.bot_command(route, argument)
+                elif command in {"/plugin", "/plugins"}:
+                    before_send()
+                    reply = await self.plugin_command(route, command, argument)
                 elif command in {"/jobs", "/schedule", "/unschedule"}:
                     before_send()
                     reply = self.schedule_command(route, item.actor, command, argument)
@@ -657,6 +681,8 @@ class Service:
                 elif is_command:
                     if command not in {
                         "/bot",
+                        "/plugin",
+                        "/plugins",
                         "/jobs",
                         "/schedule",
                         "/unschedule",
@@ -706,6 +732,7 @@ class Service:
                         ("help", "Show help"),
                         ("bot", "List or switch bots"),
                         ("jobs", "Scheduled jobs"),
+                        ("plugins", "Connected services"),
                         ("status", "Current Delta session"),
                         ("new", "Start a fresh session"),
                         ("name", "Name this session"),
@@ -750,6 +777,7 @@ class Service:
             job.cancel()
         await asyncio.gather(*running, return_exceptions=True)
         await self.sessions.close()
+        await self.team.plugins.close()
         for user in self.config.users:
             with contextlib.suppress(TelegramError):
                 await asyncio.wait_for(self.telegram.send(user, "Delta gateway disconnected."), 2)

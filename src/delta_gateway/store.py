@@ -204,6 +204,24 @@ class Store:
             )
         return self.bot(identifier)
 
+    def plugins_for(self, bot):
+        return [
+            row[0]
+            for row in self.db.execute(
+                "SELECT plugin FROM bot_plugins WHERE instance=? AND bot=? ORDER BY plugin",
+                (self.instance, bot),
+            ).fetchall()
+        ]
+
+    def set_plugin(self, bot, plugin, enabled):
+        with self.db:
+            self.db.execute(
+                "INSERT OR IGNORE INTO bot_plugins VALUES(?,?,?)"
+                if enabled
+                else "DELETE FROM bot_plugins WHERE instance=? AND bot=? AND plugin=?",
+                (self.instance, bot, plugin),
+            )
+
     def add_job(self, chat, user, actor, thread, bot, task, spec, first, missed="run"):
         with self.db:
             active = self.db.execute(
@@ -373,6 +391,8 @@ class Store:
                     ).fetchone()[0]
                     control = (text.split(maxsplit=1) or [""])[0].split("@")[0] in (
                         "/bot",
+                        "/plugin",
+                        "/plugins",
                         "/jobs",
                         "/schedule",
                         "/unschedule",

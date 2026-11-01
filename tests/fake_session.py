@@ -31,6 +31,22 @@ class Provider:
                 ),
             )
             return
+        if prompt == "plugin" and isinstance(messages[-1], HumanEntry):
+            yield StreamCloseEvent(
+                reason="toolUse",
+                message=ModelEntry(
+                    model=model,
+                    stop_reason="toolUse",
+                    content=[
+                        CallBlock(
+                            id="plugin-1",
+                            name="github_list_issues",
+                            arguments={"repo": "a/b"},
+                        )
+                    ],
+                ),
+            )
+            return
         if prompt.startswith("delegate:") and isinstance(messages[-1], HumanEntry):
             _, bot, task = prompt.split(":", 2)
             yield StreamCloseEvent(

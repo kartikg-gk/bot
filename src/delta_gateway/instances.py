@@ -9,6 +9,7 @@ from uuid import uuid4
 
 from delta_gateway.config import load
 from delta_gateway.ownership import SessionLock
+from delta_gateway.plugins import CREDENTIAL_VARIABLES
 
 
 class OperatorError(RuntimeError):
@@ -71,7 +72,7 @@ def config_lease(config):
 
 
 def token_variables(config):
-    names = {"TELEGRAM_BOT_TOKEN", config.token_env}
+    names = {"TELEGRAM_BOT_TOKEN", config.token_env, *CREDENTIAL_VARIABLES}
     for entry in registry().values():
         try:
             names.add(load(entry["config"], require_project=False).token_env)

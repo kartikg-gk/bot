@@ -71,7 +71,7 @@ class SessionManager:
                         await self.clients.pop(old).close()
                         break
             bot = self.store.bot(current.bot)
-            config = prepare(self.config, bot)
+            config = prepare(self.config, bot, self.store.plugins_for(bot.id))
             if current.provider:
                 config.provider = current.provider
             if current.model:
@@ -105,7 +105,7 @@ class SessionManager:
 
     async def delegate(self, bot, task, event=None):
         """Run a task as another bot in a fresh session, and return its answer."""
-        config = prepare(self.config, bot)
+        config = prepare(self.config, bot, self.store.plugins_for(bot.id))
         sandbox = (
             await self.sandbox_options(config, bot, None) if config.executor == "docker" else {}
         )
@@ -268,6 +268,13 @@ class SessionManager:
     async def switch_bot(self, route, bot):
         async with self.lock_for(route):
             return self.store.switch_bot(route, bot)
+
+    async def restart_idle(self):
+        """Close idle engines so changed tool grants apply on their next start."""
+        for identity, client in list(self.clients.items()):
+            if identity not in self.busy:
+                await client.close()
+                self.clients.pop(identity, None)
 
     async def cleanup(self):
         now = time.monotonic()
