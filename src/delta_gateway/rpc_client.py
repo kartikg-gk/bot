@@ -10,7 +10,7 @@ from collections import deque
 from pathlib import Path
 from uuid import uuid4
 
-from delta_gateway.client import RequestRejected, WorkerLost
+from delta_gateway.errors import RequestRejected, WorkerLost
 from delta_gateway.instances import token_variables
 
 LIMIT = 16 * 1024 * 1024

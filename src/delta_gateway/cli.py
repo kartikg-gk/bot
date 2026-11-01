@@ -1,8 +1,7 @@
-"""Worker entry point and a local console for exercising the connection."""
+"""Operator command line."""
 
 import argparse
 import asyncio
-import sys
 from pathlib import Path
 
 
@@ -96,103 +95,22 @@ def parser():
     instances = commands.add_parser("instances")
     instances.add_argument("action", nargs="?", choices=["list", "forget"], default="list")
     instances.add_argument("target", nargs="?")
-    for name in ("worker", "console"):
-        sub = commands.add_parser(name)
-        sub.add_argument("--cwd", type=Path, default=Path.cwd())
-        sub.add_argument(
-            "--session-dir", type=Path, default=Path.home() / ".delta-gateway/sessions"
-        )
-        sub.add_argument("--session", help="Resume an existing Delta session ID")
-        sub.add_argument("--provider")
-        sub.add_argument("--model")
-        sub.add_argument("--policy", choices=["ask", "deny", "auto"], default="deny")
-        sub.add_argument("--approval-seconds", type=int, default=300)
-        sub.add_argument(
-            "--trust-project",
-            action="store_true",
-            help="Explicitly trust this project's instructions and extensions",
-        )
-        sub.add_argument(
-            "--allow-mutations",
-            action="store_true",
-            help="Allow mutating tools without individual approval",
-        )
-        sub.add_argument("--session-factory", help=argparse.SUPPRESS)
-        if name == "console":
-            sub.add_argument("prompt")
     return result
-
-
-async def console(options):
-    from delta_gateway.client import WorkerClient, worker_command
-
-    args = [
-        "--cwd",
-        options.cwd,
-        "--session-dir",
-        options.session_dir,
-        "--policy",
-        options.policy,
-        "--approval-seconds",
-        options.approval_seconds,
-    ]
-    for key in ("session", "provider", "model", "session_factory"):
-        value = getattr(options, key)
-        if value:
-            args.extend(["--" + key.replace("_", "-"), value])
-    for key in ("trust_project", "allow_mutations"):
-        if getattr(options, key):
-            args.append("--" + key.replace("_", "-"))
-    async with WorkerClient(worker_command(*args)) as client:
-        print("Session: " + client.state["session_id"], file=sys.stderr)
-        await client.request("submit", text=options.prompt)
-        while True:
-            event = await client.next_event()
-            if event["event"] == "assistant.text":
-                print(event["text"], end="", flush=True)
-            elif event["event"] == "tool.started":
-                print("\nTool: " + event["tool"], file=sys.stderr)
-            elif event["event"] == "approval.requested":
-                await client.request(
-                    "approval.respond", approval_id=event["approval_id"], allow=False
-                )
-            elif event["event"] == "run.finished":
-                print()
-                if event["outcome"] != "completed":
-                    raise RuntimeError("Run " + event["outcome"])
-                break
 
 
 def main():
     options = parser().parse_args()
-    if options.command not in {"worker", "console"}:
-        from delta_gateway.health import operator_command
-        from delta_gateway.instances import OperatorError
-        from delta_gateway.telegram import TelegramError
+    from delta_gateway.health import operator_command
+    from delta_gateway.instances import OperatorError
+    from delta_gateway.telegram import TelegramError
 
-        try:
-            asyncio.run(operator_command(options))
-        except KeyboardInterrupt:
-            raise SystemExit(130) from None
-        except (OperatorError, TelegramError) as exc:
-            raise SystemExit(str(exc)) from None
-        except Exception:
-            raise SystemExit(
-                "Gateway operation failed; check configuration, state and bot access."
-            ) from None
-        return
-    options.cwd = options.cwd.expanduser().resolve()
-    options.session_dir = str(options.session_dir.expanduser().resolve())
-    if not options.cwd.is_dir():
-        raise SystemExit("Working directory does not exist")
-    if options.command == "worker":
-        from delta_gateway.worker import run_worker
-
-        run_worker(options)
-    else:
-        try:
-            asyncio.run(console(options))
-        except KeyboardInterrupt:
-            raise SystemExit(130) from None
-        except (RuntimeError, TimeoutError) as exc:
-            raise SystemExit(str(exc)) from None
+    try:
+        asyncio.run(operator_command(options))
+    except KeyboardInterrupt:
+        raise SystemExit(130) from None
+    except (OperatorError, TelegramError) as exc:
+        raise SystemExit(str(exc)) from None
+    except Exception:
+        raise SystemExit(
+            "Gateway operation failed; check configuration, state and bot access."
+        ) from None

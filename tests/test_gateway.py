@@ -5,13 +5,10 @@ from types import SimpleNamespace
 import httpx
 import pytest
 
-from delta_gateway.approvals import ApprovalGate
-from delta_gateway.client import WorkerClient
 from delta_gateway.config import Config, load, save
 from delta_gateway.service import Service
 from delta_gateway.store import Store
 from delta_gateway.telegram import Telegram, TelegramError, chunks
-from tests.test_subprocess import command, finish
 
 
 def config(tmp_path, **kw):
@@ -120,35 +117,6 @@ async def test_service_stop_is_responsive_and_clears_queue(tmp_path):
         assert any(text.startswith("Abort requested") for _, text, _ in bot.sent)
     finally:
         await service.close()
-
-
-@pytest.mark.parametrize("allow", [True, False])
-async def test_real_tool_approval_boundary(tmp_path, allow):
-    async with WorkerClient(command(tmp_path) + ["--policy", "ask"]) as client:
-        await client.request("submit", text="write")
-        event = await client.next_event()
-        while event["event"] != "approval.requested":
-            event = await client.next_event()
-        assert event["event"] == "approval.requested"
-        assert not (tmp_path / "approved.txt").exists()
-        await client.request("approval.respond", approval_id=event["approval_id"], allow=allow)
-        await finish(client)
-        assert (tmp_path / "approved.txt").exists() == allow
-        with pytest.raises(RuntimeError):
-            await client.request("approval.respond", approval_id=event["approval_id"], allow=True)
-
-
-async def test_approval_expiry_and_shell_not_prefix_allowed():
-    events = []
-    worker = SimpleNamespace(run_id="r", send=lambda **event: events.append(event))
-    gate = ApprovalGate(worker, "ask", 0.02)
-    result = await gate.check(SimpleNamespace(name="Bash", arguments={"command": "ls; rm file"}))
-    assert result[0]
-    assert events[0]["event"] == "approval.requested"
-    with pytest.raises(ValueError):
-        gate.respond(events[0]["approval_id"], True)
-    result = await gate.check(SimpleNamespace(name="Unknown", arguments={"api_key": "value"}))
-    assert result[0]
 
 
 async def test_callback_authorization_and_audit(tmp_path):
@@ -305,16 +273,6 @@ async def test_failed_approval_delivery_denies(tmp_path):
         await service.close()
 
 
-async def test_approval_expires_over_subprocess(tmp_path):
-    async with WorkerClient(
-        command(tmp_path) + ["--policy", "ask", "--approval-seconds", "1"]
-    ) as client:
-        await client.request("submit", text="write")
-        events = await finish(client)
-        assert any(e["event"] == "approval.resolved" and not e["allow"] for e in events)
-        assert not (tmp_path / "approved.txt").exists()
-
-
 async def test_poll_rate_limit(tmp_path, monkeypatch):
     delays = []
 
@@ -403,21 +361,3 @@ async def test_worker_cap_and_webhook_refusal(tmp_path):
         assert not service.clients
     finally:
         await service.close()
-
-
-async def test_worker_does_not_inherit_bot_token(monkeypatch):
-    import sys
-
-    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "private-bot-token")
-    script = (
-        "import json,os,sys; "
-        'print(json.dumps(dict(version=1,kind="event",event="worker.ready",'
-        'has_token="TELEGRAM_BOT_TOKEN" in os.environ)),flush=True); '
-        "sys.stdin.read()"
-    )
-    client = await WorkerClient([sys.executable, "-c", script], grace=0.1).start()
-    try:
-        assert not client.state["has_token"]
-    finally:
-        await client._terminate()
-        await client.close()

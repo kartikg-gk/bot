@@ -7,8 +7,8 @@ import time
 from pathlib import Path
 from uuid import uuid4
 
-from delta_gateway.client import RequestRejected, WorkerLost
 from delta_gateway.commands import split
+from delta_gateway.errors import RequestRejected, WorkerLost
 from delta_gateway.previews import Preview, typing
 from delta_gateway.routing import payload
 from delta_gateway.session_manager import SessionManager
@@ -233,14 +233,19 @@ class Service:
         except (RuntimeError, OSError):
             self.store.mark(item.id, "uncertain")
             with contextlib.suppress(TelegramError):
-                await self.notify(item.key, "Delivery uncertain. It was not replayed. Check /status.")
+                await self.notify(
+                    item.key, "Delivery uncertain. It was not replayed. Check /status."
+                )
             return True
         if not delivered:
             self.store.mark(item.id, status)
             return False
         self.store.mark(item.id, "completed")
         with contextlib.suppress(TelegramError):
-            await self.reply(route, "Queued for the active run." if command == "/queue" else "Sent to the active run.")
+            await self.reply(
+                route,
+                "Queued for the active run." if command == "/queue" else "Sent to the active run.",
+            )
         return True
 
     async def last(self, key):

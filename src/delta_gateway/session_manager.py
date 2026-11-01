@@ -4,7 +4,7 @@ import asyncio
 import time
 from pathlib import Path
 
-from delta_gateway.client import RequestRejected, WorkerLost
+from delta_gateway.errors import RequestRejected, WorkerLost
 from delta_gateway.rpc_client import RpcClient
 
 

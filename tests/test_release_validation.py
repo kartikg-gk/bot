@@ -9,9 +9,9 @@ import httpx
 import pytest
 
 from delta_gateway.cli import parser
-from delta_gateway.client import WorkerLost
 from delta_gateway.config import load, save
 from delta_gateway.database_import import migrate_configs
+from delta_gateway.errors import WorkerLost
 from delta_gateway.instances import OperatorError, config_lease
 from delta_gateway.operators import configure, operator_command
 from delta_gateway.rpc_client import RpcClient
