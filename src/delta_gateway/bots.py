@@ -17,6 +17,7 @@ class Bot:
     role: str
     instructions: str
     chief: bool
+    temporary: bool = False
 
 
 def bot_root(config, bot):

@@ -46,7 +46,7 @@ def test_version_four_database_upgrades(tmp_path):
     Store(tmp_path / "state", "a" * 32).close()
     db = sqlite3.connect(path)
     db.executescript(
-        "DROP TABLE bot_plugins; DROP TABLE jobs; DROP TABLE delegations;"
+        "DROP TABLE tasks; DROP TABLE bot_plugins; DROP TABLE jobs; DROP TABLE delegations;"
         "DROP TABLE route_bots; DROP TABLE bots;"
         "ALTER TABLE routes DROP COLUMN bot;"
         "INSERT INTO routes(instance,chat,user,thread,session,created,updated) "

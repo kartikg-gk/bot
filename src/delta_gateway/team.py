@@ -8,6 +8,8 @@ from delta_gateway.plugins import PLUGINS, TOOL_OWNERS, PluginRunner
 from delta_gateway.schedule import parse_when
 
 MAX_ANSWER = 20000
+MAX_AGENTS = 4
+AGENT_SECONDS = 1800
 TEXT = {"type": "string", "minLength": 1}
 
 CHIEF_TOOLS = [
@@ -49,6 +51,63 @@ CHIEF_TOOLS = [
             "type": "object",
             "properties": {"bot_name": TEXT, "task": TEXT},
             "required": ["bot_name", "task"],
+            "additionalProperties": False,
+        },
+        approval=False,
+    ),
+    dict(
+        name="spawn_agent",
+        description=(
+            "Start an agent on a self-contained goal in the background and return a task ID at "
+            "once. It is read-only: it can read and answer but not change anything. Omit bot_name "
+            "for a temporary agent. Its answer goes to the chat. Set follow_up to be told when it "
+            "finishes."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {"goal": TEXT, "bot_name": TEXT, "follow_up": {"type": "boolean"}},
+            "required": ["goal"],
+            "additionalProperties": False,
+        },
+        approval=False,
+    ),
+    dict(
+        name="spawn_writer_agent",
+        description=(
+            "Like spawn_agent, but the agent may change files and run commands in its sandbox "
+            "without asking. Only when the user asks for this."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {"goal": TEXT, "bot_name": TEXT, "follow_up": {"type": "boolean"}},
+            "required": ["goal"],
+            "additionalProperties": False,
+        },
+    ),
+    dict(
+        name="list_tasks",
+        description="List recent background tasks and their status.",
+        parameters={"type": "object", "properties": {}, "additionalProperties": False},
+        approval=False,
+    ),
+    dict(
+        name="check_task",
+        description="Read one background task's status and answer.",
+        parameters={
+            "type": "object",
+            "properties": {"task_id": {"type": "integer"}},
+            "required": ["task_id"],
+            "additionalProperties": False,
+        },
+        approval=False,
+    ),
+    dict(
+        name="cancel_task",
+        description="Stop a running background task.",
+        parameters={
+            "type": "object",
+            "properties": {"task_id": {"type": "integer"}},
+            "required": ["task_id"],
             "additionalProperties": False,
         },
         approval=False,
@@ -98,6 +157,7 @@ class Team:
     def __init__(self, store, sessions, plugins=None):
         self.store, self.sessions = store, sessions
         self.plugins = plugins or PluginRunner()
+        self.spawner = self.canceller = None
 
     def teammate(self, name):
         bot = self.store.find_bot(name)
@@ -133,6 +193,28 @@ class Team:
             return await self.call_plugin(name, arguments, bot)
         if bot and not bot.chief:
             raise ValueError("Only the chief of staff can use this tool.")
+        if name in {"spawn_agent", "spawn_writer_agent"}:
+            identifier = self.spawner(
+                arguments["goal"],
+                arguments.get("bot_name"),
+                name == "spawn_writer_agent",
+                arguments.get("follow_up", False),
+                route,
+                actor or route.user,
+            )
+            return f"Started task #{identifier} in the background."
+        if name == "list_tasks":
+            return json.dumps(
+                [dict(id=t.id, status=t.status, goal=t.goal[:200]) for t in self.store.tasks()]
+            )
+        if name == "check_task":
+            task = self.store.task(arguments["task_id"])
+            if not task:
+                raise ValueError("No task with that number")
+            return json.dumps(dict(id=task.id, status=task.status, answer=task.answer or ""))
+        if name == "cancel_task":
+            self.canceller(arguments["task_id"])
+            return "Cancelling."
         if name == "schedule_job":
             requested = arguments.get("bot_name")
             bot = self.store.find_bot(requested) if requested else self.store.bots()[0]

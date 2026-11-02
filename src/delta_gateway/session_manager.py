@@ -103,9 +103,11 @@ class SessionManager:
             self.touched[self.identity(current)] = time.monotonic()
             return client
 
-    async def delegate(self, bot, task, event=None):
+    async def delegate(self, bot, task, event=None, policy=None):
         """Run a task as another bot in a fresh session, and return its answer."""
         config = prepare(self.config, bot, self.store.plugins_for(bot.id))
+        if policy:
+            config.policy = policy
         sandbox = (
             await self.sandbox_options(config, bot, None) if config.executor == "docker" else {}
         )

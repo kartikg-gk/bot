@@ -65,6 +65,28 @@ MISSED_GRACE = 300
 
 
 @dataclass
+class Task:
+    id: int
+    chat: int
+    user: int
+    actor: int
+    thread: int
+    bot: str
+    goal: str
+    policy: str
+    follow_up: int
+    status: str
+    answer: str | None
+
+    @property
+    def key(self):
+        return self.chat, self.user, self.thread
+
+
+TASK_FIELDS = "id,chat,user,actor,thread,bot,goal,policy,follow_up,status,answer"
+
+
+@dataclass
 class InboxItem:
     id: int
     chat: int
@@ -136,6 +158,11 @@ class Store:
                 (instance,),
             )
             self.db.execute(
+                "UPDATE tasks SET status='interrupted',finished=? "
+                "WHERE instance=? AND status='running'",
+                (time.time(), instance),
+            )
+            self.db.execute(
                 "UPDATE jobs SET running=0,last_status='interrupted' "
                 "WHERE instance=? AND running=1",
                 (instance,),
@@ -172,24 +199,24 @@ class Store:
                     ),
                 )
 
-    def bots(self):
+    def bots(self, *, temporary=False):
         return [
-            Bot(row[0], row[1], row[2], row[3], bool(row[4]))
+            Bot(row[0], row[1], row[2], row[3], bool(row[4]), bool(row[5]))
             for row in self.db.execute(
-                "SELECT id,name,role,instructions,chief FROM bots WHERE instance=? "
-                "ORDER BY chief DESC,created",
-                (self.instance,),
+                "SELECT id,name,role,instructions,chief,temporary FROM bots WHERE instance=? "
+                "AND (? OR temporary=0) ORDER BY chief DESC,created",
+                (self.instance, int(temporary)),
             ).fetchall()
         ]
 
     def bot(self, identifier):
-        return next((bot for bot in self.bots() if bot.id == identifier), None)
+        return next((bot for bot in self.bots(temporary=True) if bot.id == identifier), None)
 
     def find_bot(self, name):
         key = name.strip().casefold()
         return next((bot for bot in self.bots() if bot.name.casefold() == key), None)
 
-    def create_bot(self, name, role, instructions=""):
+    def create_bot(self, name, role, instructions="", *, temporary=False):
         name, role = name.strip(), role.strip()
         if not name or not role:
             raise ValueError("A bot needs a name and a purpose")
@@ -198,11 +225,121 @@ class Store:
         identifier = uuid4().hex
         with self.db:
             self.db.execute(
-                "INSERT INTO bots(id,instance,name,name_key,role,instructions,created) "
-                "VALUES(?,?,?,?,?,?,?)",
-                (identifier, self.instance, name, name.casefold(), role, instructions, time.time()),
+                "INSERT INTO bots(id,instance,name,name_key,role,instructions,temporary,created) "
+                "VALUES(?,?,?,?,?,?,?,?)",
+                (
+                    identifier,
+                    self.instance,
+                    name,
+                    name.casefold(),
+                    role,
+                    instructions,
+                    int(temporary),
+                    time.time(),
+                ),
             )
         return self.bot(identifier)
+
+    def keep_bot(self, identifier, name):
+        name = name.strip()
+        if not name:
+            raise ValueError("Give the agent a name")
+        if self.find_bot(name):
+            raise ValueError(f"A bot named {name} already exists")
+        with self.db:
+            self.db.execute(
+                "UPDATE bots SET name=?,name_key=?,temporary=0 WHERE instance=? AND id=?",
+                (name, name.casefold(), self.instance, identifier),
+            )
+
+    def remove_bot(self, identifier):
+        with self.db:
+            self.db.execute(
+                "DELETE FROM bots WHERE instance=? AND id=? AND temporary=1",
+                (self.instance, identifier),
+            )
+
+    def add_task(self, chat, user, actor, thread, bot, goal, policy, follow_up):
+        with self.db:
+            return self.db.execute(
+                "INSERT INTO tasks(instance,chat,user,actor,thread,bot,goal,policy,follow_up,"
+                "status,created) VALUES(?,?,?,?,?,?,?,?,?,'running',?)",
+                (
+                    self.instance,
+                    chat,
+                    user,
+                    actor,
+                    thread,
+                    bot,
+                    goal,
+                    policy,
+                    int(follow_up),
+                    time.time(),
+                ),
+            ).lastrowid
+
+    def task(self, identifier):
+        row = self.db.execute(
+            f"SELECT {TASK_FIELDS} FROM tasks WHERE instance=? AND id=?",
+            (self.instance, identifier),
+        ).fetchone()
+        return Task(*row) if row else None
+
+    def tasks(self, limit=20):
+        return [
+            Task(*row)
+            for row in self.db.execute(
+                f"SELECT {TASK_FIELDS} FROM tasks WHERE instance=? ORDER BY id DESC LIMIT ?",
+                (self.instance, limit),
+            ).fetchall()
+        ]
+
+    def running_tasks(self):
+        return self.db.execute(
+            "SELECT count(*) FROM tasks WHERE instance=? AND status='running'", (self.instance,)
+        ).fetchone()[0]
+
+    def finish_task(self, identifier, status, answer):
+        with self.db:
+            self.db.execute(
+                "UPDATE tasks SET status=?,answer=?,finished=?,reported=1 "
+                "WHERE instance=? AND id=?",
+                (status, answer, time.time(), self.instance, identifier),
+            )
+
+    def take_unreported(self):
+        with self.db:
+            rows = self.db.execute(
+                f"SELECT {TASK_FIELDS} FROM tasks WHERE instance=? AND status='interrupted' "
+                "AND reported=0",
+                (self.instance,),
+            ).fetchall()
+            self.db.execute(
+                "UPDATE tasks SET reported=1 WHERE instance=? AND status='interrupted'",
+                (self.instance,),
+            )
+        return [Task(*row) for row in rows]
+
+    def add_report(self, task, text):
+        """Queue a prompt for the chat's session, using IDs Telegram updates never reach."""
+        with self.db:
+            newest = self.db.execute(
+                "SELECT max(id) FROM inbox WHERE instance=?", (self.instance,)
+            ).fetchone()[0]
+            identifier = max(newest or 0, 2**60) + 1
+            self.db.execute(
+                "INSERT INTO inbox VALUES(?,?,?,?,?,'prompt',NULL,?,?,?)",
+                (
+                    self.instance,
+                    identifier,
+                    task.chat,
+                    task.actor,
+                    text,
+                    time.time(),
+                    task.thread,
+                    task.user,
+                ),
+            )
 
     def plugins_for(self, bot):
         return [
@@ -391,6 +528,10 @@ class Store:
                     ).fetchone()[0]
                     control = (text.split(maxsplit=1) or [""])[0].split("@")[0] in (
                         "/bot",
+                        "/tasks",
+                        "/cancel",
+                        "/keep",
+                        "/discard",
                         "/plugin",
                         "/plugins",
                         "/jobs",

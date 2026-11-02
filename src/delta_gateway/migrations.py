@@ -1,6 +1,6 @@
 "Transactional topic-aware schema migration. Call only with the gateway stopped."
 
-SCHEMA = 8
+SCHEMA = 9
 
 
 def migrate(db, version):
@@ -16,6 +16,27 @@ def migrate(db, version):
         migrate_to_seven(db)
     if version < 8:
         migrate_to_eight(db)
+    if version < 9:
+        migrate_to_nine(db)
+
+
+def migrate_to_nine(db):
+    try:
+        db.executescript("""
+        BEGIN IMMEDIATE;
+        ALTER TABLE bots ADD COLUMN temporary INTEGER NOT NULL DEFAULT 0;
+        CREATE TABLE tasks(id INTEGER PRIMARY KEY AUTOINCREMENT,instance TEXT NOT NULL,
+          chat INTEGER NOT NULL,user INTEGER NOT NULL,actor INTEGER NOT NULL,
+          thread INTEGER NOT NULL,bot TEXT NOT NULL,goal TEXT NOT NULL,policy TEXT NOT NULL,
+          follow_up INTEGER NOT NULL,status TEXT NOT NULL,answer TEXT,reported INTEGER NOT NULL
+          DEFAULT 0,created REAL NOT NULL,finished REAL);
+        CREATE INDEX tasks_status ON tasks(instance,status);
+        PRAGMA user_version=9;
+        COMMIT;
+        """)
+    except BaseException:
+        db.rollback()
+        raise
 
 
 def migrate_to_eight(db):
