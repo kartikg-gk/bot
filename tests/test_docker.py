@@ -64,6 +64,7 @@ async def test_prompt_runs_in_a_container_through_the_proxy(tmp_path):
         tmp_path,
         executor="docker",
         docker_image=IMAGE,
+        docker_network="bridge",
         provider="openai",
         model="fake-model",
         policy="auto",
@@ -102,7 +103,9 @@ async def test_prompt_runs_in_a_container_through_the_proxy(tmp_path):
 async def test_container_sees_only_the_run_token_and_can_write_its_files(tmp_path, monkeypatch):
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "12345:private-fake-value")
     monkeypatch.setenv("OPENAI_API_KEY", REAL_KEY)
-    c = config(tmp_path, executor="docker", docker_image=IMAGE, provider="openai")
+    c = config(
+        tmp_path, executor="docker", docker_image=IMAGE, docker_network="bridge", provider="openai"
+    )
     bot = Profile("b" * 32, "Researcher", "Finds things", "", False)
     prepared = prepare(c, bot)
     prepared.sessions_path.mkdir(parents=True, exist_ok=True)
@@ -132,7 +135,13 @@ async def test_session_resumes_in_a_new_container(tmp_path):
     )
     await proxy.start()
     c = config(
-        tmp_path, executor="docker", docker_image=IMAGE, provider="openai", model="m", policy="auto"
+        tmp_path,
+        executor="docker",
+        docker_image=IMAGE,
+        docker_network="bridge",
+        provider="openai",
+        model="m",
+        policy="auto",
     )
     bot = Profile("b" * 32, "Researcher", "Finds things", "", False)
     prepared = prepare(c, bot)
@@ -196,7 +205,13 @@ async def test_chief_tool_call_crosses_the_container_boundary(tmp_path):
     )
     await proxy.start()
     c = config(
-        tmp_path, executor="docker", docker_image=IMAGE, provider="openai", model="m", policy="ask"
+        tmp_path,
+        executor="docker",
+        docker_image=IMAGE,
+        docker_network="bridge",
+        provider="openai",
+        model="m",
+        policy="ask",
     )
     bot = Profile("b" * 32, "Chief of Staff", "Runs the team", "", True)
     prepared = prepare(c, bot)
@@ -233,4 +248,73 @@ async def test_chief_tool_call_crosses_the_container_boundary(tmp_path):
             assert event["outcome"] == "completed"
             assert (await client.request("get_last_assistant_text"))["text"] == "from the fake"
     finally:
+        await proxy.close()
+
+
+PROBE = """
+import socket, sys
+for host, port in (("1.1.1.1", 443), ("host.docker.internal", 443), ("example.com", 80)):
+    try:
+        socket.create_connection((host, port), 3).close()
+        print("REACHED", host)
+    except OSError:
+        print("BLOCKED", host)
+"""
+
+
+async def test_locked_network_allows_only_the_model_proxy(tmp_path):
+    from delta_gateway.network import LockedNetwork
+
+    proxy = ModelProxy(
+        resolve=lambda _: Upstream("https://provider.test/v1", REAL_KEY),
+        transport=httpx.MockTransport(lambda request: model_reply(request, [])),
+    )
+    await proxy.start()
+    locked = LockedNetwork("c" * 32, IMAGE)
+    try:
+        egress = await locked.ensure(proxy.port)
+        c = config(
+            tmp_path,
+            executor="docker",
+            docker_image=IMAGE,
+            provider="openai",
+            model="m",
+            policy="auto",
+        )
+        bot = Profile("b" * 32, "Researcher", "Finds things", "", False)
+        prepared = prepare(c, bot)
+        prepared.sessions_path.mkdir(parents=True, exist_ok=True)
+        launch = docker_launch(
+            prepared,
+            bot,
+            None,
+            proxy.issue("openai", 5),
+            proxy.port,
+            key_env="OPENAI_API_KEY",
+            egress=egress,
+        )
+        image = launch.command.index(IMAGE)
+        probe = subprocess.run(
+            [*launch.command[: image + 1], "python", "-c", PROBE],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            env={**os.environ, **launch.environment},
+        )
+        assert probe.stdout.count("BLOCKED") == 3, probe.stdout + probe.stderr
+        client = RpcClient(
+            prepared,
+            command=launch.command,
+            environment=launch.environment,
+            paths=launch.paths,
+            timeout=60,
+        )
+        async with client:
+            await client.request("prompt", message="hello")
+            async with asyncio.timeout(60):
+                while (await client.next_event()).get("type") != "agent_settled":
+                    pass
+            assert (await client.request("get_last_assistant_text"))["text"] == "from the fake"
+    finally:
+        await locked.close()
         await proxy.close()

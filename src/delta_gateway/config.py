@@ -53,7 +53,7 @@ class Config(BaseModel):
     release_url: str | None = None
     executor: str = Field(default="local", pattern=r"^(local|docker)$")
     docker_image: str | None = None
-    docker_network: str = "bridge"
+    docker_network: str = "locked"
     docker_memory: str = "2g"
     proxy_host: str = "127.0.0.1"
     proxy_port: int = Field(default=0, ge=0, le=65535)
@@ -241,7 +241,7 @@ def load(path, *, require_project=True):
             approval_seconds=d.get("approvalSeconds", 300),
             executor=d.get("executor", "local"),
             docker_image=d.get("dockerImage"),
-            docker_network=d.get("dockerNetwork", "bridge"),
+            docker_network=d.get("dockerNetwork", "locked"),
             docker_memory=d.get("dockerMemory", "2g"),
             proxy_host=d.get("proxyHost", "127.0.0.1"),
             proxy_port=d.get("proxyPort", 0),

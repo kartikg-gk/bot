@@ -27,7 +27,7 @@ def key_variable(provider):
     return provider_info(provider).key_env
 
 
-def docker_launch(config, bot, session, token, proxy_port, *, key_env=None):
+def docker_launch(config, bot, session, token, proxy_port, *, key_env=None, egress=None):
     """Build the container command. Secrets travel by name, never in arguments."""
     if not config.provider:
         raise CredentialError("Set a default provider for sandboxed bots")
@@ -35,7 +35,10 @@ def docker_launch(config, bot, session, token, proxy_port, *, key_env=None):
     sessions = config.sessions_path
     key_env = key_env or key_variable(config.provider)
     base_env = config.provider.upper() + "_BASE_URL"
-    environment = {key_env: token, base_env: f"http://{HOST_ALIAS}:{proxy_port}"}
+    if config.docker_network == "locked" and not egress:
+        raise CredentialError("The locked sandbox network is not ready")
+    base_url = egress.url if egress else f"http://{HOST_ALIAS}:{proxy_port}"
+    environment = {key_env: token, base_env: base_url}
     command = [
         "docker",
         "run",
@@ -52,9 +55,8 @@ def docker_launch(config, bot, session, token, proxy_port, *, key_env=None):
         "--memory",
         config.docker_memory,
         "--network",
-        config.docker_network,
-        "--add-host",
-        f"{HOST_ALIAS}:host-gateway",
+        egress.network if egress else config.docker_network,
+        *(() if egress else ("--add-host", f"{HOST_ALIAS}:host-gateway")),
         "-v",
         f"{config.project}:{SANDBOX_WORKSPACE}",
         "-v",

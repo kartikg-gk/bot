@@ -89,7 +89,12 @@ async def test_proxy_enforces_request_limit(proxy):
 
 def sandbox_config(tmp_path, **settings):
     return config(
-        tmp_path, executor="docker", docker_image="delta-bot:test", provider="openai", **settings
+        tmp_path,
+        executor="docker",
+        docker_image="delta-bot:test",
+        docker_network="bridge",
+        provider="openai",
+        **settings,
     )
 
 
@@ -147,3 +152,10 @@ def test_sandbox_settings_round_trip(tmp_path):
 def test_docker_needs_an_image(tmp_path):
     with pytest.raises(ValueError):
         config(tmp_path, executor="docker").validate_paths()
+
+
+def test_locked_network_is_the_default_and_fails_closed(tmp_path):
+    c = config(tmp_path, executor="docker", docker_image="i", provider="openai")
+    assert c.docker_network == "locked"
+    with pytest.raises(ValueError):
+        docker_launch(c, Profile("b" * 32, "R", "r", "", False), None, "t", 1, key_env="K")

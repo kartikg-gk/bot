@@ -476,7 +476,7 @@ class Service:
         if command == "/tasks":
             return (
                 "\n".join(
-                    f"#{t.id} {t.status} {self.store.bot(t.bot).name if self.store.bot(t.bot) else '-'}"
+                    f"#{t.id} {t.status} {getattr(self.store.bot(t.bot), 'name', '-')}"
                     f": {t.goal[:100]}"
                     for t in self.store.tasks()
                 )

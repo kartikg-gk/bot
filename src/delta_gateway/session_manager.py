@@ -7,6 +7,7 @@ from pathlib import Path
 from delta_gateway.bots import prepare
 from delta_gateway.errors import RequestRejected, WorkerLost
 from delta_gateway.executor import docker_launch
+from delta_gateway.network import LockedNetwork
 from delta_gateway.proxy import ModelProxy
 from delta_gateway.rpc_client import RpcClient
 
@@ -27,6 +28,7 @@ class SessionManager:
         self.busy = set()
         self.creation = asyncio.Lock()
         self.proxy = None
+        self.network = None
 
     def identity(self, route):
         return (
@@ -43,7 +45,12 @@ class SessionManager:
         if not config.provider:
             raise WorkerLost("Set a default provider for sandboxed bots")
         token = self.proxy.issue(config.provider, self.config.max_model_requests)
-        launch = docker_launch(config, bot, session, token, self.proxy.port)
+        egress = None
+        if config.docker_network == "locked":
+            if not self.network:
+                self.network = LockedNetwork(self.config.instance, config.docker_image)
+            egress = await self.network.ensure(self.proxy.port)
+        launch = docker_launch(config, bot, session, token, self.proxy.port, egress=egress)
         return dict(
             command=launch.command,
             environment=launch.environment,
@@ -293,5 +300,7 @@ class SessionManager:
             *(client.close() for client in self.clients.values()), return_exceptions=True
         )
         self.clients.clear()
+        if self.network:
+            await self.network.close()
         if self.proxy:
             await self.proxy.close()
