@@ -28,8 +28,7 @@ class Upstream:
 
 def resolve_upstream(provider):
     """Find one provider's API key and endpoint in this process's Delta settings."""
-    from delta_app.catalog import provider_info
-    from delta_app.config.store import load_config
+    from delta_app.config.store import load_config, provider_info
 
     try:
         info = provider_info(provider)

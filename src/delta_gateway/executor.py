@@ -22,7 +22,7 @@ class SandboxLaunch:
 
 
 def key_variable(provider):
-    from delta_app.catalog import provider_info
+    from delta_app.config.store import provider_info
 
     return provider_info(provider).key_env
 

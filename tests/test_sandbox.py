@@ -159,3 +159,13 @@ def test_locked_network_is_the_default_and_fails_closed(tmp_path):
     assert c.docker_network == "locked"
     with pytest.raises(ValueError):
         docker_launch(c, Profile("b" * 32, "R", "r", "", False), None, "t", 1, key_env="K")
+
+
+def test_real_credential_lookup_and_key_variable(monkeypatch):
+    from delta_gateway.executor import key_variable
+    from delta_gateway.proxy import resolve_upstream
+
+    monkeypatch.setenv("OPENAI_API_KEY", REAL_KEY)
+    assert key_variable("openai") == "OPENAI_API_KEY"
+    found = resolve_upstream("openai")
+    assert found.key == REAL_KEY and found.base_url.startswith("http")
