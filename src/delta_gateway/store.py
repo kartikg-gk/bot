@@ -532,6 +532,7 @@ class Store:
                         "/cancel",
                         "/keep",
                         "/discard",
+                        "/memory",
                         "/plugin",
                         "/plugins",
                         "/jobs",

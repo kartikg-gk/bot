@@ -8,3 +8,6 @@ __pycache__/
 dist/
 .env
 vendor/
+
+# Markdown stays local until docs are written
+*.md

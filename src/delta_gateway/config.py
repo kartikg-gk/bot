@@ -58,6 +58,12 @@ class Config(BaseModel):
     proxy_host: str = "127.0.0.1"
     proxy_port: int = Field(default=0, ge=0, le=65535)
     max_model_requests: int = Field(default=500, ge=1)
+    memory_enabled: bool = False
+    memory_extract: bool = False
+    memory_search_limit: int = Field(default=10, ge=1, le=50)
+    memory_search_floor: float = Field(default=0.3, ge=0, le=1)
+    memory_token_budget: int = Field(default=2000, ge=100)
+    memory_extraction_seconds: float = Field(default=120, gt=0)
 
     @property
     def database_path(self):
@@ -142,6 +148,14 @@ def document(config):
             maxModelRequests=config.max_model_requests,
         ),
         limits=dict(workers=config.workers, backlog=config.backlog),
+        memory=dict(
+            enabled=config.memory_enabled,
+            extract=config.memory_extract,
+            searchLimit=config.memory_search_limit,
+            searchFloor=config.memory_search_floor,
+            tokenBudget=config.memory_token_budget,
+            extractionSeconds=config.memory_extraction_seconds,
+        ),
         retentionDays=config.retention_days,
         shutdownTimeout=config.shutdown_timeout,
         releaseUrl=config.release_url,
@@ -173,12 +187,14 @@ def load(path, *, require_project=True):
             "telegram",
             "delta",
             "limits",
+            "memory",
             "retentionDays",
             "shutdownTimeout",
             "releaseUrl",
         }:
             raise ValueError("Unknown configuration version or fields")
         t, d, limits = raw["telegram"], raw.get("delta", {}), raw.get("limits", {})
+        m = raw.get("memory", {})
         for value, allowed in (
             (
                 t,
@@ -218,6 +234,17 @@ def load(path, *, require_project=True):
                 },
             ),
             (limits, {"workers", "backlog"}),
+            (
+                m,
+                {
+                    "enabled",
+                    "extract",
+                    "searchLimit",
+                    "searchFloor",
+                    "tokenBudget",
+                    "extractionSeconds",
+                },
+            ),
         ):
             if not isinstance(value, dict) or set(value) - allowed:
                 raise ValueError("Unknown nested configuration fields")
@@ -246,6 +273,12 @@ def load(path, *, require_project=True):
             proxy_host=d.get("proxyHost", "127.0.0.1"),
             proxy_port=d.get("proxyPort", 0),
             max_model_requests=d.get("maxModelRequests", 500),
+            memory_enabled=m.get("enabled", False),
+            memory_extract=m.get("extract", False),
+            memory_search_limit=m.get("searchLimit", 10),
+            memory_search_floor=m.get("searchFloor", 0.3),
+            memory_token_budget=m.get("tokenBudget", 2000),
+            memory_extraction_seconds=m.get("extractionSeconds", 120),
             token_env=t.get("tokenEnvironment", "TELEGRAM_BOT_TOKEN"),
             bot_token=t.get("botToken"),
             allow_groups=t.get("allowGroups", False),

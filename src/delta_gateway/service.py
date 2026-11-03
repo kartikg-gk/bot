@@ -11,6 +11,19 @@ from uuid import uuid4
 from delta_gateway.bots import bot_root
 from delta_gateway.commands import split
 from delta_gateway.errors import RequestRejected, WorkerLost
+from delta_gateway.memory import (
+    EXTRACTOR,
+    Memory,
+    VectorIndex,
+    default_embedder,
+    episode_check_prompt,
+    episode_prompt,
+    facts_prompt,
+    owner_for,
+    parse_episode,
+    parse_episode_check,
+    parse_facts,
+)
 from delta_gateway.plugins import PLUGINS
 from delta_gateway.previews import Preview, typing
 from delta_gateway.routing import payload
@@ -22,6 +35,8 @@ from delta_gateway.version_check import status as version_status
 
 HELP = (
     "/bot [name] /bot new <name> | <purpose>\n"
+    "/memory [facts|episodes|conflicts|forgotten] /memory search <words>\n"
+    "/memory remember <text> /memory forget|restore|keep <number> /memory retry\n"
     "/plugins /plugin on|off <name> [bot]\n"
     "/tasks /cancel <number> /keep <number> <name> /discard <number>\n"
     "/jobs /schedule <when> | [bot] | <task> /unschedule <number>\n"
@@ -44,6 +59,18 @@ class Service:
         self.jobs, self.cards, self.previews = {}, {}, {}
         self.job_tasks = {}
         self.agent_tasks = {}
+        self.memory_tasks = set()
+        self.memory = (
+            Memory(
+                self.store,
+                VectorIndex(config.state / "memory" / "qdrant", default_embedder()),
+                limit=config.memory_search_limit,
+                floor=config.memory_search_floor,
+                budget=config.memory_token_budget,
+            )
+            if config.memory_enabled
+            else None
+        )
         self.team.spawner, self.team.canceller = self.spawn, self.cancel_task
         self.slots = asyncio.Semaphore(config.workers or 2**30)
         self.dispatch_lock = asyncio.Lock()
@@ -226,9 +253,21 @@ class Service:
                 if self.stopping:
                     return
                 await preview.update("Working…", force=True)
+                message = item.text if text is None else text
+                bot = self.store.bot(self.store.get_route(route.id).bot)
+                # Agent reports carry another model's output; they are never remembered.
+                owner = (
+                    owner_for(item.chat, item.actor) if self.memory and item.id <= 2**60 else None
+                )
+                recalled = ""
+                if owner is not None:
+                    try:
+                        recalled = await self.memory.recall(bot.id, owner, message)
+                    except Exception:  # noqa: BLE001 - memory never blocks a conversation
+                        recalled = ""
                 final, outcome = await self.sessions.prompt(
                     route,
-                    item.text if text is None else text,
+                    recalled + message,
                     event=event,
                     before_send=before_send,
                     accepted=lambda: self.store.mark(item.id, "running"),
@@ -243,6 +282,12 @@ class Service:
                     self.store.mark(item.id, outcome)
                 except TelegramError:
                     self.store.mark(item.id, "delivery_failed")
+                if owner is not None and outcome == "completed" and self.config.memory_extract:
+                    extraction = asyncio.create_task(
+                        self.remember_exchange(route, bot, owner, message, final)
+                    )
+                    self.memory_tasks.add(extraction)
+                    extraction.add_done_callback(self.memory_tasks.discard)
         except asyncio.CancelledError:
             if started:
                 self.store.mark(item.id, "uncertain")
@@ -267,6 +312,127 @@ class Service:
                     await self.resolve_card(handle, False, "run_closed")
             await preview.finish()
             self.previews.pop(item.key, None)
+
+    async def extractor_call(self, prompt):
+        extractor = next(
+            (b for b in self.store.bots(temporary=True) if b.name == EXTRACTOR), None
+        ) or self.store.create_bot(EXTRACTOR, "Extracts memories.", temporary=True)
+        async with asyncio.timeout(self.config.memory_extraction_seconds):
+            answer, _ = await self.sessions.delegate(extractor, prompt, policy="deny")
+        return answer
+
+    async def remember_exchange(self, route, bot, owner, user, assistant):
+        """Extract facts and an episode in the background; failures never reach the user."""
+        try:
+            known = await self.memory.search(bot.id, owner, user + "\n" + assistant)
+            answer = await self.extractor_call(facts_prompt(user, assistant, known))
+            conflicts = []
+            for fact in parse_facts(answer, {f.id for f in known}):
+                details = dict(source="extracted", tags=fact["tags"], quote=fact["quote"])
+                if fact["updates"]:
+                    outcome, number = self.memory.revise(
+                        fact["updates"],
+                        bot.id,
+                        owner,
+                        fact["text"],
+                        fact["confidence"],
+                        **details,
+                    )
+                    if outcome == "conflict":
+                        conflicts.append(number)
+                else:
+                    self.memory.add(
+                        bot.id,
+                        owner,
+                        "fact",
+                        fact["text"],
+                        confidence=fact["confidence"],
+                        **details,
+                    )
+            if parse_episode_check(
+                await self.extractor_call(episode_check_prompt(user, assistant))
+            ):
+                episode = parse_episode(await self.extractor_call(episode_prompt(user, assistant)))
+                if episode:
+                    text, detail, tags = episode
+                    self.memory.add(
+                        bot.id,
+                        owner,
+                        "episode",
+                        text,
+                        source="episode",
+                        tags=tags,
+                        detail=detail,
+                    )
+            await self.memory.sync()
+            if conflicts:
+                await self.reply(
+                    route,
+                    "A memory changed and I was not sure which version is right. Neither is "
+                    "used until you choose. See /memory conflicts.",
+                )
+        except Exception:  # noqa: BLE001 - extraction failure must not affect the conversation
+            pass
+
+    async def memory_command(self, route, item, argument):
+        if not self.memory:
+            return "Memory is not enabled in this install."
+        owner = owner_for(item.chat, item.actor)
+        if owner is None:
+            return "Memory is personal, so it is off in group chats."
+        bot = self.store.bot(self.store.conversation(*route.key).bot)
+        action, _, rest = argument.partition(" ")
+        rest = rest.strip()
+
+        def listing(facts, empty):
+            return "\n".join(f"#{f.id} ({f.kind}) {f.text}" for f in facts) or empty
+
+        if action in {"", "facts"}:
+            facts = self.memory.facts(bot.id, owner, kind="fact")
+            episodes = len(self.memory.facts(bot.id, owner, kind="episode"))
+            conflicts = len(self.memory.facts(bot.id, owner, ("conflicted",)))
+            failed = len(self.memory.failed(bot.id, owner))
+            return (
+                f"{bot.name} remembers {len(facts)} facts and {episodes} episodes about you. "
+                f"Conflicts: {conflicts}. Not searchable yet: {failed}.\n"
+                + listing(facts, "No facts yet.")
+            )
+        if action == "episodes":
+            return listing(self.memory.facts(bot.id, owner, kind="episode"), "No episodes yet.")
+        if action == "conflicts":
+            return (
+                listing(self.memory.facts(bot.id, owner, ("conflicted",)), "No conflicts.")
+                + "\nUse /memory keep <number> on the right version."
+            )
+        if action == "forgotten":
+            return (
+                listing(self.memory.facts(bot.id, owner, ("retracted",)), "Nothing forgotten.")
+                + "\nUse /memory restore <number> to bring one back."
+            )
+        if action == "search" and rest:
+            return listing(await self.memory.search(bot.id, owner, rest), "Nothing relevant.")
+        if action == "remember" and rest:
+            number = self.memory.remember(bot.id, owner, rest)
+            await self.memory.sync()
+            return f"Remembered as #{number}."
+        if action == "retry":
+            count = self.memory.retry(bot.id, owner)
+            await self.memory.sync()
+            return f"Retried {count}. Not searchable yet: {len(self.memory.failed(bot.id, owner))}."
+        changes = {
+            "forget": self.memory.forget,
+            "restore": self.memory.restore,
+            "keep": self.memory.keep,
+        }
+        if action not in changes or not rest.isdigit():
+            raise ValueError("Use /help to see the /memory commands.")
+        changes[action](int(rest), bot.id, owner)
+        await self.memory.sync()
+        return {
+            "forget": "Forgotten. /memory restore brings it back.",
+            "restore": "Restored.",
+            "keep": "Kept; the other version is superseded.",
+        }[action]
 
     async def forward(self, item, command, argument):
         route = self.store.conversation(*item.key)
@@ -657,6 +823,9 @@ class Service:
                 elif command in {"/tasks", "/cancel", "/keep", "/discard"}:
                     before_send()
                     reply = await self.task_command(command, argument)
+                elif command == "/memory":
+                    before_send()
+                    reply = await self.memory_command(route, item, argument)
                 elif command in {"/plugin", "/plugins"}:
                     before_send()
                     reply = await self.plugin_command(route, command, argument)
@@ -803,6 +972,7 @@ class Service:
                         "/cancel",
                         "/keep",
                         "/discard",
+                        "/memory",
                         "/bot",
                         "/plugin",
                         "/plugins",
@@ -856,6 +1026,7 @@ class Service:
                         ("bot", "List or switch bots"),
                         ("jobs", "Scheduled jobs"),
                         ("tasks", "Background agents"),
+                        ("memory", "What your bot remembers"),
                         ("plugins", "Connected services"),
                         ("status", "Current Delta session"),
                         ("new", "Start a fresh session"),
@@ -877,6 +1048,14 @@ class Service:
         for task in self.store.take_unreported():
             with contextlib.suppress(TelegramError):
                 await self.notify(task.key, f"Task #{task.id} was interrupted and not replayed.")
+        if self.memory:
+            # Facts saved before a crash, or whose copy to the index failed, get indexed now.
+            with self.store.db:
+                self.store.db.execute(
+                    "UPDATE memory_facts SET sync_errors=0 WHERE instance=? AND indexed=0",
+                    (self.config.instance,),
+                )
+            await self.memory.sync()
         await self.dispatch()
         while not self.stopping:
             updates = await self.telegram.call(
@@ -899,10 +1078,17 @@ class Service:
 
     async def close(self):
         self.stopping = True
-        running = [*self.jobs.values(), *self.job_tasks.values(), *self.agent_tasks.values()]
+        running = [
+            *self.jobs.values(),
+            *self.job_tasks.values(),
+            *self.agent_tasks.values(),
+            *self.memory_tasks,
+        ]
         for job in running:
             job.cancel()
         await asyncio.gather(*running, return_exceptions=True)
+        if self.memory:
+            self.memory.close()
         await self.sessions.close()
         await self.team.plugins.close()
         for user in self.config.users:
