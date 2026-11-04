@@ -11,6 +11,7 @@ from uuid import uuid4
 from delta_gateway import background
 from delta_gateway.config import Config, load, save
 from delta_gateway.database_import import migrate_configs
+from delta_gateway.embedded import default_provider
 from delta_gateway.instances import (
     OperatorError,
     atomic_json,
@@ -22,7 +23,6 @@ from delta_gateway.instances import (
     resolve,
 )
 from delta_gateway.ownership import SessionLock
-from delta_gateway.rpc_client import RpcClient
 from delta_gateway.service import run_service
 from delta_gateway.store import Store
 from delta_gateway.telegram_sdk import TelegramSDK as Telegram
@@ -73,8 +73,6 @@ def configure_path(options, path):
         "per_user_groups",
         "group_mentions_only",
         "draft_previews",
-        "engine_command",
-        "engine_arg",
         "workers",
         "backlog",
         "idle_seconds",
@@ -139,10 +137,6 @@ def configure_path(options, path):
             )
     if getattr(options, "bot_token", None):
         config.bot_token = SecretStr(options.bot_token)
-    if getattr(options, "engine_command", None):
-        config.engine_command = [options.engine_command]
-    if getattr(options, "engine_arg", None) is not None:
-        config.engine_args = options.engine_arg
     if config.model and config.model.lower() == "default":
         config.provider = config.model = None
     elif config.model and not config.provider and "/" in config.model:
@@ -200,8 +194,8 @@ async def doctor(config, options):
     print("State directory writable: OK")
     print("Process: " + background.status(config)["state"])
     if options.worker:
-        async with RpcClient(config):
-            print("Native Delta RPC capabilities and startup: OK")
+        default_provider(config)
+        print("Delta and the model provider load: OK")
     if options.online:
         token = config.token()
         if not token:

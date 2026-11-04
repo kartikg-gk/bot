@@ -560,8 +560,8 @@ class Service:
             )
 
     def spawn(self, goal, bot_name, writer, follow_up, route, actor):
-        if writer and self.config.executor != "docker":
-            raise ValueError("Writer agents need the Docker executor.")
+        if writer and self.config.executor == "local":
+            raise ValueError("Writer agents need a sandbox: the Docker or Daytona executor.")
         if self.store.running_tasks() >= MAX_AGENTS:
             raise ValueError(f"At most {MAX_AGENTS} background agents can run at once.")
         delegation = None

@@ -1,6 +1,5 @@
 """Named bots: each has a purpose, a workspace, and Markdown memory."""
 
-import json
 from dataclasses import dataclass
 
 from delta_gateway.plugins import PLUGINS
@@ -8,6 +7,8 @@ from delta_gateway.team import CHIEF_PROMPT, CHIEF_TOOLS
 
 MEMORY_FILES = ("PREFERENCES.md", "KNOWLEDGE.md")
 MEMORY_PREVIEW = 8000
+# Where a sandboxed bot sees its memory folder.
+MEMORY_MOUNT = "/bot/memory"
 
 
 @dataclass
@@ -30,7 +31,7 @@ def workspace(config, bot):
 
 def system_addition(config, bot):
     directory = bot_root(config, bot) / "memory"
-    shown = "/bot/memory" if config.executor == "docker" else directory
+    shown = directory if config.executor == "local" else MEMORY_MOUNT
     sections = [
         f"# Who you are\nYou are {bot.name}. Purpose: {bot.role}",
         f"Working instructions: {bot.instructions or 'Learn these from the user.'}",
@@ -50,8 +51,19 @@ def system_addition(config, bot):
     return "\n\n".join(sections)
 
 
+@dataclass
+class Prepared:
+    config: object
+    addition: str
+    definitions: list
+
+    @property
+    def project(self):
+        return self.config.project
+
+
 def prepare(config, bot, plugins=()):
-    """Return engine settings for this bot, creating its files on first use."""
+    """Return the bot's settings, prompt addition and gateway tools, creating its files."""
     root = bot_root(config, bot)
     (root / "memory").mkdir(parents=True, exist_ok=True)
     for name in MEMORY_FILES:
@@ -60,23 +72,9 @@ def prepare(config, bot, plugins=()):
             path.write_text(f"# {name.removesuffix('.md').title()}\n", encoding="utf-8")
     directory = workspace(config, bot)
     directory.mkdir(parents=True, exist_ok=True)
-    prompt = root / "system.md"
-    prompt.write_text(system_addition(config, bot), encoding="utf-8")
     prepared = config.model_copy(deep=True)
     prepared.project = directory
-    prepared.engine_args = [
-        *prepared.engine_args,
-        "--append-system-prompt-file",
-        "/bot/system.md" if config.executor == "docker" else str(prompt),
-    ]
     definitions = list(CHIEF_TOOLS) if bot.chief else []
     for plugin in plugins:
         definitions += PLUGINS[plugin].tools
-    if definitions:
-        tools = root / "host-tools.json"
-        tools.write_text(json.dumps(definitions), encoding="utf-8")
-        prepared.engine_args += [
-            "--host-tools-file",
-            "/bot/host-tools.json" if config.executor == "docker" else str(tools),
-        ]
-    return prepared
+    return Prepared(prepared, system_addition(config, bot), definitions)

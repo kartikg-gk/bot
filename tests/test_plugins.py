@@ -1,5 +1,3 @@
-import json
-
 import httpx
 import pytest
 
@@ -66,9 +64,7 @@ def test_granted_tools_reach_any_bot_with_write_approval(tmp_path, store):
     c = config(tmp_path)
     worker = store.create_bot("Researcher", "Finds things")
     prepared = prepare(c, worker, ["github"])
-    index = prepared.engine_args.index("--host-tools-file")
-    tools = json.loads(open(prepared.engine_args[index + 1], encoding="utf-8").read())
-    by_name = {tool["name"]: tool for tool in tools}
+    by_name = {tool["name"]: tool for tool in prepared.definitions}
     assert "delegate_task" not in by_name
     assert by_name["github_read_file"]["approval"] is False
     assert "approval" not in by_name["github_create_issue"]

@@ -1,15 +1,23 @@
 "Serial session ownership, native RPC clients, and durable conversation mappings."
 
 import asyncio
+import importlib
 import time
 from pathlib import Path
 
-from delta_gateway.bots import prepare
+from delta_gateway.bots import MEMORY_MOUNT, bot_root, prepare
+from delta_gateway.computer import DockerComputer, LocalComputer
+from delta_gateway.embedded import EmbeddedClient
 from delta_gateway.errors import RequestRejected, WorkerLost
-from delta_gateway.executor import docker_launch
-from delta_gateway.network import LockedNetwork
-from delta_gateway.proxy import ModelProxy
-from delta_gateway.rpc_client import RpcClient
+
+
+def secret_variables(config):
+    from delta_app.catalog import available_providers
+
+    from delta_gateway.instances import token_variables
+
+    keys = {provider.key_env for provider in available_providers() if provider.key_env}
+    return token_variables(config) | keys
 
 
 def assistant_text(message):
@@ -27,8 +35,10 @@ class SessionManager:
         self.touched = {}
         self.busy = set()
         self.creation = asyncio.Lock()
-        self.proxy = None
-        self.network = None
+        self.computers = {}
+        if isinstance(factory, str):
+            module, _, name = factory.partition(":")
+            self.factory = getattr(importlib.import_module(module), name)
 
     def identity(self, route):
         return (
@@ -38,24 +48,46 @@ class SessionManager:
     def lock_for(self, route):
         return self.locks.setdefault(self.identity(route), asyncio.Lock())
 
-    async def sandbox_options(self, config, bot, session):
-        if not self.proxy:
-            self.proxy = ModelProxy(host=self.config.proxy_host, port=self.config.proxy_port)
-        await self.proxy.start()
-        if not config.provider:
-            raise WorkerLost("Set a default provider for sandboxed bots")
-        token = self.proxy.issue(config.provider, self.config.max_model_requests)
-        egress = None
-        if config.docker_network == "locked":
-            if not self.network:
-                self.network = LockedNetwork(self.config.instance, config.docker_image)
-            egress = await self.network.ensure(self.proxy.port)
-        launch = docker_launch(config, bot, session, token, self.proxy.port, egress=egress)
-        return dict(
-            command=launch.command,
-            environment=launch.environment,
-            paths=launch.paths,
-            on_close=lambda: self.proxy.revoke(token),
+    def computer_for(self, bot, prepared):
+        """One computer per bot, kept between runs so its files and installs stay."""
+        config = prepared.config
+        if bot.id not in self.computers:
+            if self.config.executor == "docker":
+                self.computers[bot.id] = DockerComputer(
+                    f"delta-bot-{self.config.instance[:8]}-{bot.id[:12]}",
+                    self.config.docker_image,
+                    config.project,
+                    memory=self.config.docker_memory,
+                    mounts=[(bot_root(self.config, bot) / "memory", MEMORY_MOUNT)],
+                )
+            elif self.config.executor == "daytona":
+                from delta_gateway.daytona import DaytonaComputer
+
+                self.computers[bot.id] = DaytonaComputer(
+                    f"delta-bot-{self.config.instance[:8]}-{bot.id[:12]}", self.config
+                )
+            else:
+                self.computers[bot.id] = LocalComputer(
+                    config.project, secret_variables(self.config)
+                )
+        return self.computers[bot.id]
+
+    def client(self, bot, session_file=None, *, policy=None, overrides=None):
+        prepared = prepare(self.config, bot, self.store.plugins_for(bot.id))
+        config = prepared.config
+        for name, value in (overrides or {}).items():
+            if value:
+                setattr(config, name, value)
+        if policy:
+            config.policy = policy
+        return EmbeddedClient(
+            config,
+            session_file,
+            computer=self.computer_for(bot, prepared),
+            addition=prepared.addition,
+            host_definitions=prepared.definitions,
+            provider=self.factory,
+            grace=self.config.shutdown_timeout,
         )
 
     async def client_for(self, route, *, fresh_if_missing=False):
@@ -77,25 +109,12 @@ class SessionManager:
                     if old not in self.busy:
                         await self.clients.pop(old).close()
                         break
-            bot = self.store.bot(current.bot)
-            config = prepare(self.config, bot, self.store.plugins_for(bot.id))
-            if current.provider:
-                config.provider = current.provider
-            if current.model:
-                config.model = current.model
-            if current.thinking:
-                config.thinking = current.thinking
-            sandbox = (
-                await self.sandbox_options(config, bot, current.session_file)
-                if config.executor == "docker"
-                else {}
-            )
-            client = RpcClient(
-                config,
+            client = self.client(
+                self.store.bot(current.bot),
                 current.session_file,
-                factory=self.factory,
-                grace=self.config.shutdown_timeout,
-                **sandbox,
+                overrides=dict(
+                    provider=current.provider, model=current.model, thinking=current.thinking
+                ),
             )
             try:
                 await client.start()
@@ -112,15 +131,7 @@ class SessionManager:
 
     async def delegate(self, bot, task, event=None, policy=None):
         """Run a task as another bot in a fresh session, and return its answer."""
-        config = prepare(self.config, bot, self.store.plugins_for(bot.id))
-        if policy:
-            config.policy = policy
-        sandbox = (
-            await self.sandbox_options(config, bot, None) if config.executor == "docker" else {}
-        )
-        client = RpcClient(
-            config, None, factory=self.factory, grace=self.config.shutdown_timeout, **sandbox
-        )
+        client = self.client(bot, policy=policy)
         try:
             await client.start()
             await client.request("prompt", message=task)
@@ -300,7 +311,6 @@ class SessionManager:
             *(client.close() for client in self.clients.values()), return_exceptions=True
         )
         self.clients.clear()
-        if self.network:
-            await self.network.close()
-        if self.proxy:
-            await self.proxy.close()
+        await asyncio.gather(
+            *(computer.stop() for computer in self.computers.values()), return_exceptions=True
+        )

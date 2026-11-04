@@ -21,8 +21,8 @@ def test_only_the_chief_gets_team_tools(tmp_path, store):
     c = config(tmp_path)
     chief = prepare(c, store.bots()[0])
     worker = prepare(c, store.create_bot("Researcher", "Finds things"))
-    assert "--host-tools-file" in chief.engine_args
-    assert "--host-tools-file" not in worker.engine_args
+    assert any(d["name"] == "delegate_task" for d in chief.definitions)
+    assert not worker.definitions
 
 
 def test_one_task_per_bot_and_restart_interrupts(tmp_path, store):

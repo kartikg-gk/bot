@@ -68,9 +68,8 @@ def test_prepare_separates_bot_files(tmp_path, store):
     prepared = prepare(c, worker)
     assert prepared.project == c.state / "bots" / worker.id / "workspace"
     assert prepared.project.is_dir()
-    system = (c.state / "bots" / worker.id / "system.md").read_text(encoding="utf-8")
-    assert "You are Researcher" in system and "KNOWLEDGE.md" in system
-    assert prepared.engine_args[-2] == "--append-system-prompt-file"
+    assert "KNOWLEDGE.md" in prepared.addition
+    assert "You are Researcher" in prepared.addition
     assert prepare(c, store.bots()[0]).project == c.project
 
 

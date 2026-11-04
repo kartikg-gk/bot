@@ -1,15 +1,10 @@
 """Interactive configuration and a searchable engine-backed model picker."""
 
 import getpass
-import json
 import os
-import subprocess
 
 from prompt_toolkit import prompt
 from prompt_toolkit.completion import FuzzyCompleter, WordCompleter
-
-from delta_gateway.instances import token_variables
-from delta_gateway.rpc_client import engine_command
 
 
 def ask(label, current=""):
@@ -18,33 +13,21 @@ def ask(label, current=""):
 
 
 def model_choices(config):
-    records = [
-        dict(type="get_capabilities", id="caps"),
-        dict(type="get_available_models", id="models"),
-        dict(type="shutdown", id="stop"),
-    ]
+    """Models from Delta's catalog for providers that have credentials on this machine."""
     try:
-        result = subprocess.run(
-            engine_command(config),
-            input="".join(json.dumps(row) + "\n" for row in records),
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            timeout=15,
-            cwd=str(config.project),
-            env={k: v for k, v in os.environ.items() if k not in token_variables(config)},
-        )
-        parsed = [json.loads(line) for line in result.stdout.splitlines() if line]
-        capabilities = next(
-            row["data"] for row in parsed if row.get("id") == "caps" and row.get("success")
-        )
-        if capabilities.get("engine") != "delta" or capabilities.get("protocolVersion") != 1:
-            return []
-        response = next(
-            row["data"] for row in parsed if row.get("id") == "models" and row.get("success")
-        )
-        return [row["provider"] + "/" + row["id"] for row in response["models"]]
-    except (OSError, ValueError, KeyError, StopIteration, subprocess.TimeoutExpired):
+        from delta_app.catalog import available_providers, models_for
+        from delta_app.config.store import load_config
+
+        saved = load_config()
+        return [
+            f"{provider.key}/{model}"
+            for provider in available_providers()
+            if not provider.needs_key
+            or os.environ.get(provider.key_env)
+            or saved.api_keys.get(provider.key)
+            for model in models_for(provider.key)
+        ]
+    except (ImportError, OSError, ValueError, AttributeError):
         return []
 
 

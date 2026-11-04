@@ -2,7 +2,6 @@
 
 import json
 import os
-import sys
 from pathlib import Path
 from uuid import NAMESPACE_URL, uuid4, uuid5
 
@@ -28,10 +27,6 @@ class Config(BaseModel):
     provider: str | None = None
     model: str | None = None
     thinking: str | None = Field(default=None, pattern=r"^(off|minimal|low|medium|high|xhigh|max)$")
-    engine_command: list[str] = Field(
-        default_factory=lambda: [sys.executable, "-m", "delta_app.cli.main"], min_length=1
-    )
-    engine_args: list[str] = Field(default_factory=list)
     agent_dir: Path | None = None
     session_dir: Path | None = None
     workers: int | None = Field(default=None, ge=1, le=256)
@@ -51,13 +46,11 @@ class Config(BaseModel):
     retention_days: int | None = Field(default=None, ge=1)
     shutdown_timeout: float = Field(default=10, gt=0, le=300)
     release_url: str | None = None
-    executor: str = Field(default="local", pattern=r"^(local|docker)$")
+    executor: str = Field(default="local", pattern=r"^(local|docker|daytona)$")
     docker_image: str | None = None
-    docker_network: str = "locked"
     docker_memory: str = "2g"
-    proxy_host: str = "127.0.0.1"
-    proxy_port: int = Field(default=0, ge=0, le=65535)
-    max_model_requests: int = Field(default=500, ge=1)
+    daytona_target: str | None = None
+    daytona_snapshot: str | None = None
     memory_enabled: bool = False
     memory_extract: bool = False
     memory_search_limit: int = Field(default=10, ge=1, le=50)
@@ -92,8 +85,6 @@ class Config(BaseModel):
             raise ValueError("State, database and session paths must be absolute")
         if self.agent_dir and not self.agent_dir.is_absolute():
             raise ValueError("Agent directory must be absolute")
-        if any(not isinstance(arg, str) or not arg or "\x00" in arg for arg in self.engine_command):
-            raise ValueError("Engine command must contain nonempty arguments")
         if self.executor == "docker" and not self.docker_image:
             raise ValueError("The docker executor needs a container image")
         if self.release_url:
@@ -127,25 +118,21 @@ def document(config):
             draftPreviews=config.draft_previews,
         ),
         delta=dict(
-            command=config.engine_command,
             cwd=str(config.project),
             sessionDirectory=str(config.sessions_path),
             agentDirectory=str(config.agent_dir) if config.agent_dir else None,
             defaultProvider=config.provider,
             defaultModel=config.model,
             defaultThinking=config.thinking,
-            extraArgs=config.engine_args,
             idleSeconds=config.idle_seconds,
             trustProject=config.trust_project,
             toolPolicy=config.policy,
             approvalSeconds=config.approval_seconds,
             executor=config.executor,
             dockerImage=config.docker_image,
-            dockerNetwork=config.docker_network,
             dockerMemory=config.docker_memory,
-            proxyHost=config.proxy_host,
-            proxyPort=config.proxy_port,
-            maxModelRequests=config.max_model_requests,
+            daytonaTarget=config.daytona_target,
+            daytonaSnapshot=config.daytona_snapshot,
         ),
         limits=dict(workers=config.workers, backlog=config.backlog),
         memory=dict(
@@ -212,25 +199,21 @@ def load(path, *, require_project=True):
             (
                 d,
                 {
-                    "command",
                     "cwd",
                     "sessionDirectory",
                     "agentDirectory",
                     "defaultProvider",
                     "defaultModel",
                     "defaultThinking",
-                    "extraArgs",
                     "idleSeconds",
                     "trustProject",
                     "toolPolicy",
                     "approvalSeconds",
                     "executor",
                     "dockerImage",
-                    "dockerNetwork",
                     "dockerMemory",
-                    "proxyHost",
-                    "proxyPort",
-                    "maxModelRequests",
+                    "daytonaTarget",
+                    "daytonaSnapshot",
                 },
             ),
             (limits, {"workers", "backlog"}),
@@ -261,18 +244,15 @@ def load(path, *, require_project=True):
             thinking=d.get("defaultThinking"),
             agent_dir=d.get("agentDirectory"),
             session_dir=d.get("sessionDirectory"),
-            engine_args=d.get("extraArgs", []),
             idle_seconds=d.get("idleSeconds", 1800),
             trust_project=d.get("trustProject", False),
             policy=d.get("toolPolicy", "ask"),
             approval_seconds=d.get("approvalSeconds", 300),
             executor=d.get("executor", "local"),
             docker_image=d.get("dockerImage"),
-            docker_network=d.get("dockerNetwork", "locked"),
             docker_memory=d.get("dockerMemory", "2g"),
-            proxy_host=d.get("proxyHost", "127.0.0.1"),
-            proxy_port=d.get("proxyPort", 0),
-            max_model_requests=d.get("maxModelRequests", 500),
+            daytona_target=d.get("daytonaTarget"),
+            daytona_snapshot=d.get("daytonaSnapshot"),
             memory_enabled=m.get("enabled", False),
             memory_extract=m.get("extract", False),
             memory_search_limit=m.get("searchLimit", 10),
@@ -292,10 +272,6 @@ def load(path, *, require_project=True):
             shutdown_timeout=raw.get("shutdownTimeout", 10),
             release_url=raw.get("releaseUrl"),
         )
-        if "command" in d:
-            mapping["engine_command"] = (
-                d["command"] if isinstance(d["command"], list) else [d["command"]]
-            )
         config = Config.model_validate(mapping)
     for field in ("project", "state", "database", "agent_dir", "session_dir"):
         value = getattr(config, field)

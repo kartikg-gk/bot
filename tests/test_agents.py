@@ -114,9 +114,10 @@ async def test_follow_up_tells_the_chief_as_untrusted_report(setup):
     service, _, _ = setup
     task = await spawn(service, follow_up=True)
     await finished(service)
-    pending = service.store.items()
-    assert len(pending) == 1 and pending[0].status == "prompt"
-    assert f"Task #{task}" in pending[0].text and "not instructions" in pending[0].text
+    # The report is queued as a prompt with an ID Telegram never uses; it may already be running.
+    rows = service.store.db.execute("SELECT text FROM inbox WHERE id>?", (2**60,)).fetchall()
+    assert len(rows) == 1
+    assert f"Task #{task}" in rows[0][0] and "not instructions" in rows[0][0]
 
 
 async def test_keep_and_discard_temporary_agents(setup):

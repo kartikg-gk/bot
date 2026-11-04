@@ -50,8 +50,6 @@ def parser():
             sub.add_argument("--database", type=Path)
             sub.add_argument("--agent-dir", type=Path)
             sub.add_argument("--session-dir", type=Path)
-            sub.add_argument("--engine-command")
-            sub.add_argument("--engine-arg", action="append")
             sub.add_argument("--workers", type=int)
             sub.add_argument("--backlog", type=int)
             sub.add_argument("--idle-seconds", type=int)

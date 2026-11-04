@@ -60,14 +60,14 @@ async def test_worker_is_closed_if_mapping_persistence_fails(tmp_path, monkeypat
     import delta_gateway.session_manager as module
 
     children = []
-    original = module.RpcClient
+    original = module.EmbeddedClient
 
     def capture(*args, **kwargs):
         child = original(*args, **kwargs)
         children.append(child)
         return child
 
-    monkeypatch.setattr(module, "RpcClient", capture)
+    monkeypatch.setattr(module, "EmbeddedClient", capture)
     service = Service(config(tmp_path), Bot(), factory="tests.fake_session:create")
     try:
 
@@ -78,7 +78,7 @@ async def test_worker_is_closed_if_mapping_persistence_fails(tmp_path, monkeypat
         with pytest.raises(RuntimeError):
             await service.sessions.client_for(service.store.conversation(11, 11, 0))
         assert len(children) == 1
-        assert children[0].process.returncode is not None
+        assert children[0].failure is not None and children[0].server is None
         assert not service.clients
     finally:
         await service.close()
@@ -96,9 +96,9 @@ async def test_stop_does_not_reschedule_cancelled_commands(tmp_path):
 
 
 async def test_queued_slash_text_remains_a_prompt_after_restart(tmp_path):
-    c = config(tmp_path)
+    c = config(tmp_path, workers=1)
     service = Service(c, Bot(), factory="tests.fake_session:create")
-    await service.slots.acquire()
+    # Hold the only work slot so the prompt is still waiting when the gateway stops.
     await service.slots.acquire()
     try:
         service.store.admit([update(1, "/queue /custom-prompt")], c)

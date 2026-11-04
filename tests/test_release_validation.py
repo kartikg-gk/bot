@@ -11,56 +11,13 @@ import pytest
 from delta_gateway.cli import parser
 from delta_gateway.config import load, save
 from delta_gateway.database_import import migrate_configs
-from delta_gateway.errors import WorkerLost
 from delta_gateway.instances import OperatorError, config_lease
 from delta_gateway.operators import configure, operator_command
-from delta_gateway.rpc_client import RpcClient
 from delta_gateway.service import Service
 from delta_gateway.telegram_sdk import TelegramSDK
 from delta_gateway.version_check import status
 from tests.test_alignment import group_update, populated
 from tests.test_gateway import Bot, config, settle, update
-
-
-async def test_rejects_incompatible_engine_and_reaps_process(tmp_path):
-    script = """
-import json,sys
-request=json.loads(sys.stdin.readline())
-print(json.dumps(dict(type="response",id=request["id"],success=True,data=dict(engine="other"))),flush=True)
-sys.stdin.read()
-"""
-    c = config(tmp_path, engine_command=[sys.executable, "-c", script])
-    client = RpcClient(c, timeout=1, grace=0.1)
-    with pytest.raises(WorkerLost, match="compatible native RPC"):
-        await client.start()
-    assert client.process.returncode is not None
-
-
-async def test_native_diagnostics_are_redacted_and_token_env_is_filtered(tmp_path, monkeypatch):
-    monkeypatch.setenv("CUSTOM_BOT_TOKEN", "private-offline-token")
-    script = """
-import json,sys,os
-print("warning: private-offline-token is not available to this worker",file=sys.stderr,flush=True)
-for line in sys.stdin:
-    r=json.loads(line)
-    if r["type"]=="get_capabilities":
-        data=dict(engine="delta",protocolVersion=1,
-                  commands=["prompt","get_state","abort","new_session",
-                            "clone","export_html","compact"],events=["agent_settled"])
-    else: data=dict(hasToken="CUSTOM_BOT_TOKEN" in os.environ)
-    print(json.dumps(dict(type="response",id=r["id"],success=True,data=data)),flush=True)
-    if r["type"]=="shutdown": break
-"""
-    c = config(
-        tmp_path, engine_command=[sys.executable, "-c", script], token_env="CUSTOM_BOT_TOKEN"
-    )
-    async with RpcClient(c) as client:
-        assert not client.state["hasToken"]
-        async with asyncio.timeout(2):
-            while not client.diagnostics:
-                await asyncio.sleep(0.01)
-        assert "warning" in " ".join(client.diagnostics)
-        assert "private-offline-token" not in " ".join(client.diagnostics)
 
 
 async def test_three_independent_conversations_can_run_by_default(tmp_path):
