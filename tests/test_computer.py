@@ -13,7 +13,12 @@ IMAGE = "python:3.12-slim"
 def docker_ready():
     if not shutil.which("docker"):
         return False
-    result = subprocess.run(["docker", "image", "inspect", IMAGE], capture_output=True)
+    try:
+        result = subprocess.run(
+            ["docker", "image", "inspect", IMAGE], capture_output=True, timeout=10
+        )
+    except subprocess.TimeoutExpired:
+        return False
     return result.returncode == 0
 
 

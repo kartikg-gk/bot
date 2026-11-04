@@ -11,7 +11,11 @@ delta-gateway = "delta_gateway.cli:main"
 [project.optional-dependencies]
 memory = [
     "fastembed>=0.5",
+    "mem0ai>=2.2.1",
     "qdrant-client>=1.12",
+]
+daytona = [
+    "daytona>=0.227.3",
 ]
 
 [dependency-groups]

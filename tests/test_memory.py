@@ -188,7 +188,7 @@ def test_episode_needs_every_field():
 @pytest.fixture
 async def service(tmp_path, monkeypatch):
     monkeypatch.setattr("delta_gateway.service.default_embedder", lambda: embed)
-    c = config(tmp_path, memory_enabled=True, memory_extract=True)
+    c = config(tmp_path, memory_enabled=True, memory_extract=True, memory_extractor="delta")
     telegram = Bot()
     result = Service(c, telegram, factory="tests.fake_session:create")
     result.sent_prompts, result.extractor_prompts = [], []
@@ -256,7 +256,7 @@ async def test_episode_is_written_only_when_the_check_says_so(service):
         )
     )
     await say(service, c, 2, "fix login")
-    chief = service.store.bots()[0].id
+    chief = service.project_of(service.store.bots()[0])
     assert [f.text[:15] for f in service.memory.facts(chief, 11, kind="episode")] == [
         "Goal: Fix login"
     ]
@@ -264,7 +264,7 @@ async def test_episode_is_written_only_when_the_check_says_so(service):
 
 async def test_unsure_update_tells_the_user_and_keep_settles_it(service):
     service, c, telegram = service
-    chief = service.store.bots()[0].id
+    chief = service.project_of(service.store.bots()[0])
     old = service.memory.add(
         chief, 11, "fact", "Billing service runs on Postgres", source="explicit"
     )
@@ -313,3 +313,45 @@ async def test_memory_is_off_by_default(tmp_path):
         )
     finally:
         await service.close()
+
+
+class FakeMem0:
+    def __init__(self):
+        self.results, self.calls = [], []
+
+    def add(self, messages, *, user_id, agent_id):
+        self.calls.append((user_id, agent_id, messages))
+        return {"results": self.results}
+
+
+async def test_mem0_adds_now_and_holds_changes_for_the_owner(memory):
+    from delta_gateway.mem0_extract import Mem0Extractor, apply
+
+    fake = FakeMem0()
+    extractor = Mem0Extractor(None, "openai", "m", memory=fake)
+    fake.results = [{"id": "m1", "memory": "Billing service runs on Postgres", "event": "ADD"}]
+    assert apply(memory, "proj", 1, await extractor.changes("proj", 1, "u", "a")) == []
+    await memory.sync()
+    assert await texts(memory, "billing service database", bot="proj") == [
+        "Billing service runs on Postgres"
+    ]
+    assert fake.calls[0][:2] == ("1", "proj")
+    fake.results = [{"id": "m1", "memory": "Billing service runs on MySQL", "event": "UPDATE"}]
+    waiting = apply(memory, "proj", 1, await extractor.changes("proj", 1, "u", "a"))
+    await memory.sync()
+    assert len(waiting) == 1 and await texts(memory, "billing service", bot="proj") == []
+    fake.results = [{"id": "m2", "memory": "Has a dog", "event": "ADD"}]
+    apply(memory, "proj", 1, await extractor.changes("proj", 1, "u", "a"))
+    fake.results = [{"id": "m2", "memory": "", "event": "DELETE"}]
+    waiting = apply(memory, "proj", 1, await extractor.changes("proj", 1, "u", "a"))
+    conflicted = [f.text for f in memory.facts("proj", 1, ("conflicted",))]
+    assert "No longer true: Has a dog" in conflicted and len(waiting) == 1
+
+
+def test_mem0_model_settings():
+    from delta_gateway.mem0_extract import llm_settings
+
+    assert llm_settings("openrouter", "x")["config"]["openrouter_base_url"].startswith("https")
+    assert llm_settings("anthropic", "y")["provider"] == "anthropic"
+    with pytest.raises(ValueError):
+        llm_settings("claude", "z")

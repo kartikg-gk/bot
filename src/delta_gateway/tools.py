@@ -23,19 +23,15 @@ from delta_app.tools._shared import (
 from delta_app.tools.bash import DEFAULT_TIMEOUT_MS, MAX_TIMEOUT_MS, make_bash_tool
 from delta_app.tools.files import make_edit_tool, make_read_tool, make_write_tool
 
-from delta_gateway.computer import CONTAINER_ROOT
-
 
 def absolute(computer, raw):
     raw = raw.strip()
     if not raw:
         raise ValueError("File path must not be empty.")
-    flavour = PurePosixPath if computer.root == CONTAINER_ROOT else PureWindowsPath
-    if computer.root != CONTAINER_ROOT and PurePosixPath(raw).is_absolute():
-        flavour = PurePosixPath
-    if not flavour(raw).is_absolute():
+    posix = getattr(computer, "posix", False)
+    if not (PurePosixPath(raw).is_absolute() or (not posix and PureWindowsPath(raw).is_absolute())):
         raise ValueError(f"File path must be absolute, got relative path: {raw}")
-    return posixpath.normpath(raw) if computer.root == CONTAINER_ROOT else raw
+    return posixpath.normpath(raw) if posix else raw
 
 
 def computer_tools(computer):

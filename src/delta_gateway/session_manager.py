@@ -5,7 +5,7 @@ import importlib
 import time
 from pathlib import Path
 
-from delta_gateway.bots import MEMORY_MOUNT, bot_root, prepare
+from delta_gateway.bots import MEMORY_MOUNT, bot_root, prepare, workspace
 from delta_gateway.computer import DockerComputer, LocalComputer
 from delta_gateway.embedded import EmbeddedClient
 from delta_gateway.errors import RequestRejected, WorkerLost
@@ -48,32 +48,34 @@ class SessionManager:
     def lock_for(self, route):
         return self.locks.setdefault(self.identity(route), asyncio.Lock())
 
-    def computer_for(self, bot, prepared):
+    def computer_for(self, bot):
         """One computer per bot, kept between runs so its files and installs stay."""
-        config = prepared.config
-        if bot.id not in self.computers:
-            if self.config.executor == "docker":
-                self.computers[bot.id] = DockerComputer(
-                    f"delta-bot-{self.config.instance[:8]}-{bot.id[:12]}",
-                    self.config.docker_image,
-                    config.project,
-                    memory=self.config.docker_memory,
-                    mounts=[(bot_root(self.config, bot) / "memory", MEMORY_MOUNT)],
-                )
-            elif self.config.executor == "daytona":
-                from delta_gateway.daytona import DaytonaComputer
+        if bot.id in self.computers:
+            return self.computers[bot.id]
+        name = f"delta-bot-{self.config.instance[:8]}-{bot.id[:12]}"
+        memory = bot_root(self.config, bot) / "memory"
+        if self.config.executor == "docker":
+            computer = DockerComputer(
+                name,
+                self.config.docker_image,
+                workspace(self.config, bot),
+                memory=self.config.docker_memory,
+                mounts=[(memory, MEMORY_MOUNT)],
+            )
+            computer.memory_path = MEMORY_MOUNT
+        elif self.config.executor == "daytona":
+            from delta_gateway.daytona import DaytonaComputer
 
-                self.computers[bot.id] = DaytonaComputer(
-                    f"delta-bot-{self.config.instance[:8]}-{bot.id[:12]}", self.config
-                )
-            else:
-                self.computers[bot.id] = LocalComputer(
-                    config.project, secret_variables(self.config)
-                )
-        return self.computers[bot.id]
+            computer = DaytonaComputer(name, self.config, memory)
+        else:
+            computer = LocalComputer(workspace(self.config, bot), secret_variables(self.config))
+            computer.memory_path = str(memory)
+        self.computers[bot.id] = computer
+        return computer
 
     def client(self, bot, session_file=None, *, policy=None, overrides=None):
-        prepared = prepare(self.config, bot, self.store.plugins_for(bot.id))
+        computer = self.computer_for(bot)
+        prepared = prepare(self.config, bot, self.store.plugins_for(bot.id), computer.memory_path)
         config = prepared.config
         for name, value in (overrides or {}).items():
             if value:
@@ -83,7 +85,7 @@ class SessionManager:
         return EmbeddedClient(
             config,
             session_file,
-            computer=self.computer_for(bot, prepared),
+            computer=computer,
             addition=prepared.addition,
             host_definitions=prepared.definitions,
             provider=self.factory,

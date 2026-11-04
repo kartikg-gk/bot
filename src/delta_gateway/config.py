@@ -53,6 +53,8 @@ class Config(BaseModel):
     daytona_snapshot: str | None = None
     memory_enabled: bool = False
     memory_extract: bool = False
+    memory_extractor: str = Field(default="mem0", pattern=r"^(mem0|delta)$")
+    memory_model: str | None = None
     memory_search_limit: int = Field(default=10, ge=1, le=50)
     memory_search_floor: float = Field(default=0.3, ge=0, le=1)
     memory_token_budget: int = Field(default=2000, ge=100)
@@ -138,6 +140,8 @@ def document(config):
         memory=dict(
             enabled=config.memory_enabled,
             extract=config.memory_extract,
+            extractor=config.memory_extractor,
+            model=config.memory_model,
             searchLimit=config.memory_search_limit,
             searchFloor=config.memory_search_floor,
             tokenBudget=config.memory_token_budget,
@@ -222,6 +226,8 @@ def load(path, *, require_project=True):
                 {
                     "enabled",
                     "extract",
+                    "extractor",
+                    "model",
                     "searchLimit",
                     "searchFloor",
                     "tokenBudget",
@@ -255,6 +261,8 @@ def load(path, *, require_project=True):
             daytona_snapshot=d.get("daytonaSnapshot"),
             memory_enabled=m.get("enabled", False),
             memory_extract=m.get("extract", False),
+            memory_extractor=m.get("extractor", "mem0"),
+            memory_model=m.get("model"),
             memory_search_limit=m.get("searchLimit", 10),
             memory_search_floor=m.get("searchFloor", 0.3),
             memory_token_budget=m.get("tokenBudget", 2000),

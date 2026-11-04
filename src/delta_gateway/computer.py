@@ -60,6 +60,8 @@ class LocalComputer:
 class DockerComputer:
     """A long-lived container per bot with no network. Stopping keeps its files."""
 
+    posix = True
+
     def __init__(self, name, image, root, *, memory="2g", mounts=()):
         self.name, self.image, self.host_root, self.memory = name, image, str(root), memory
         self.mounts = list(mounts)

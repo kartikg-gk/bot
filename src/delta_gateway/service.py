@@ -8,9 +8,11 @@ import time
 from pathlib import Path
 from uuid import uuid4
 
-from delta_gateway.bots import bot_root
+from delta_gateway.bots import bot_root, workspace
 from delta_gateway.commands import split
 from delta_gateway.errors import RequestRejected, WorkerLost
+from delta_gateway.mem0_extract import Mem0Extractor
+from delta_gateway.mem0_extract import apply as apply_mem0
 from delta_gateway.memory import (
     EXTRACTOR,
     Memory,
@@ -60,6 +62,7 @@ class Service:
         self.job_tasks = {}
         self.agent_tasks = {}
         self.memory_tasks = set()
+        self.mem0 = None
         self.memory = (
             Memory(
                 self.store,
@@ -262,7 +265,7 @@ class Service:
                 recalled = ""
                 if owner is not None:
                     try:
-                        recalled = await self.memory.recall(bot.id, owner, message)
+                        recalled = await self.memory.recall(self.project_of(bot), owner, message)
                     except Exception:  # noqa: BLE001 - memory never blocks a conversation
                         recalled = ""
                 final, outcome = await self.sessions.prompt(
@@ -321,34 +324,51 @@ class Service:
             answer, _ = await self.sessions.delegate(extractor, prompt, policy="deny")
         return answer
 
+    def project_of(self, bot):
+        """Memory belongs to the folder a bot works in, so bots on one project share it."""
+        return str(workspace(self.config, bot))
+
+    async def remember_facts(self, project, owner, user, assistant):
+        if self.config.memory_extractor == "mem0":
+            if self.mem0 is None:
+                from delta_app.cli.main import _resolve_provider_name
+
+                from delta_gateway.embedded import default_provider
+
+                provider = _resolve_provider_name(self.config.provider)
+                self.mem0 = Mem0Extractor(
+                    self.config.state / "memory" / "mem0",
+                    provider,
+                    self.config.memory_model or default_provider(self.config)[2],
+                )
+            return apply_mem0(
+                self.memory,
+                project,
+                owner,
+                await self.mem0.changes(project, owner, user, assistant),
+            )
+        known = await self.memory.search(project, owner, user + "\n" + assistant)
+        answer = await self.extractor_call(facts_prompt(user, assistant, known))
+        conflicts = []
+        for fact in parse_facts(answer, {f.id for f in known}):
+            details = dict(source="extracted", tags=fact["tags"], quote=fact["quote"])
+            if fact["updates"]:
+                outcome, number = self.memory.revise(
+                    fact["updates"], project, owner, fact["text"], fact["confidence"], **details
+                )
+                if outcome == "conflict":
+                    conflicts.append(number)
+            else:
+                self.memory.add(
+                    project, owner, "fact", fact["text"], confidence=fact["confidence"], **details
+                )
+        return conflicts
+
     async def remember_exchange(self, route, bot, owner, user, assistant):
         """Extract facts and an episode in the background; failures never reach the user."""
         try:
-            known = await self.memory.search(bot.id, owner, user + "\n" + assistant)
-            answer = await self.extractor_call(facts_prompt(user, assistant, known))
-            conflicts = []
-            for fact in parse_facts(answer, {f.id for f in known}):
-                details = dict(source="extracted", tags=fact["tags"], quote=fact["quote"])
-                if fact["updates"]:
-                    outcome, number = self.memory.revise(
-                        fact["updates"],
-                        bot.id,
-                        owner,
-                        fact["text"],
-                        fact["confidence"],
-                        **details,
-                    )
-                    if outcome == "conflict":
-                        conflicts.append(number)
-                else:
-                    self.memory.add(
-                        bot.id,
-                        owner,
-                        "fact",
-                        fact["text"],
-                        confidence=fact["confidence"],
-                        **details,
-                    )
+            project = self.project_of(bot)
+            conflicts = await self.remember_facts(project, owner, user, assistant)
             if parse_episode_check(
                 await self.extractor_call(episode_check_prompt(user, assistant))
             ):
@@ -356,7 +376,7 @@ class Service:
                 if episode:
                     text, detail, tags = episode
                     self.memory.add(
-                        bot.id,
+                        project,
                         owner,
                         "episode",
                         text,
@@ -388,37 +408,47 @@ class Service:
             return "\n".join(f"#{f.id} ({f.kind}) {f.text}" for f in facts) or empty
 
         if action in {"", "facts"}:
-            facts = self.memory.facts(bot.id, owner, kind="fact")
-            episodes = len(self.memory.facts(bot.id, owner, kind="episode"))
-            conflicts = len(self.memory.facts(bot.id, owner, ("conflicted",)))
-            failed = len(self.memory.failed(bot.id, owner))
+            facts = self.memory.facts(self.project_of(bot), owner, kind="fact")
+            episodes = len(self.memory.facts(self.project_of(bot), owner, kind="episode"))
+            conflicts = len(self.memory.facts(self.project_of(bot), owner, ("conflicted",)))
+            failed = len(self.memory.failed(self.project_of(bot), owner))
             return (
                 f"{bot.name} remembers {len(facts)} facts and {episodes} episodes about you. "
                 f"Conflicts: {conflicts}. Not searchable yet: {failed}.\n"
                 + listing(facts, "No facts yet.")
             )
         if action == "episodes":
-            return listing(self.memory.facts(bot.id, owner, kind="episode"), "No episodes yet.")
+            return listing(
+                self.memory.facts(self.project_of(bot), owner, kind="episode"), "No episodes yet."
+            )
         if action == "conflicts":
             return (
-                listing(self.memory.facts(bot.id, owner, ("conflicted",)), "No conflicts.")
+                listing(
+                    self.memory.facts(self.project_of(bot), owner, ("conflicted",)), "No conflicts."
+                )
                 + "\nUse /memory keep <number> on the right version."
             )
         if action == "forgotten":
             return (
-                listing(self.memory.facts(bot.id, owner, ("retracted",)), "Nothing forgotten.")
+                listing(
+                    self.memory.facts(self.project_of(bot), owner, ("retracted",)),
+                    "Nothing forgotten.",
+                )
                 + "\nUse /memory restore <number> to bring one back."
             )
         if action == "search" and rest:
-            return listing(await self.memory.search(bot.id, owner, rest), "Nothing relevant.")
+            return listing(
+                await self.memory.search(self.project_of(bot), owner, rest), "Nothing relevant."
+            )
         if action == "remember" and rest:
-            number = self.memory.remember(bot.id, owner, rest)
+            number = self.memory.remember(self.project_of(bot), owner, rest)
             await self.memory.sync()
             return f"Remembered as #{number}."
         if action == "retry":
-            count = self.memory.retry(bot.id, owner)
+            count = self.memory.retry(self.project_of(bot), owner)
             await self.memory.sync()
-            return f"Retried {count}. Not searchable yet: {len(self.memory.failed(bot.id, owner))}."
+            failed = len(self.memory.failed(self.project_of(bot), owner))
+            return f"Retried {count}. Not searchable yet: {failed}."
         changes = {
             "forget": self.memory.forget,
             "restore": self.memory.restore,
@@ -426,7 +456,7 @@ class Service:
         }
         if action not in changes or not rest.isdigit():
             raise ValueError("Use /help to see the /memory commands.")
-        changes[action](int(rest), bot.id, owner)
+        changes[action](int(rest), self.project_of(bot), owner)
         await self.memory.sync()
         return {
             "forget": "Forgotten. /memory restore brings it back.",

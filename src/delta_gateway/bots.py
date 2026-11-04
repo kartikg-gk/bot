@@ -29,9 +29,9 @@ def workspace(config, bot):
     return config.project if bot.chief else bot_root(config, bot) / "workspace"
 
 
-def system_addition(config, bot):
+def system_addition(config, bot, memory_path=None):
     directory = bot_root(config, bot) / "memory"
-    shown = directory if config.executor == "local" else MEMORY_MOUNT
+    shown = memory_path or directory
     sections = [
         f"# Who you are\nYou are {bot.name}. Purpose: {bot.role}",
         f"Working instructions: {bot.instructions or 'Learn these from the user.'}",
@@ -62,7 +62,7 @@ class Prepared:
         return self.config.project
 
 
-def prepare(config, bot, plugins=()):
+def prepare(config, bot, plugins=(), memory_path=None):
     """Return the bot's settings, prompt addition and gateway tools, creating its files."""
     root = bot_root(config, bot)
     (root / "memory").mkdir(parents=True, exist_ok=True)
@@ -77,4 +77,4 @@ def prepare(config, bot, plugins=()):
     definitions = list(CHIEF_TOOLS) if bot.chief else []
     for plugin in plugins:
         definitions += PLUGINS[plugin].tools
-    return Prepared(prepared, system_addition(config, bot), definitions)
+    return Prepared(prepared, system_addition(config, bot, memory_path), definitions)

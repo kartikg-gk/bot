@@ -27,13 +27,13 @@ def migrate_to_ten(db):
         db.executescript("""
         BEGIN IMMEDIATE;
         CREATE TABLE memory_facts(id INTEGER PRIMARY KEY AUTOINCREMENT,instance TEXT NOT NULL,
-          bot TEXT NOT NULL,owner INTEGER NOT NULL,kind TEXT NOT NULL,text TEXT NOT NULL,
+          project TEXT NOT NULL,owner INTEGER NOT NULL,kind TEXT NOT NULL,text TEXT NOT NULL,
           tags TEXT NOT NULL,confidence REAL NOT NULL,quote TEXT,detail TEXT,
           source TEXT NOT NULL,prompt_version INTEGER,status TEXT NOT NULL,replaces INTEGER,
           conflict INTEGER,created REAL NOT NULL,changed REAL NOT NULL,
           indexed INTEGER NOT NULL DEFAULT 0,sync_errors INTEGER NOT NULL DEFAULT 0,
-          sync_error TEXT);
-        CREATE INDEX memory_owner ON memory_facts(instance,bot,owner,status);
+          sync_error TEXT,external TEXT);
+        CREATE INDEX memory_owner ON memory_facts(instance,project,owner,status);
         CREATE INDEX memory_unsynced ON memory_facts(instance,indexed);
         PRAGMA user_version=10;
         COMMIT;
