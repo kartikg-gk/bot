@@ -341,6 +341,35 @@ class Store:
                 ),
             )
 
+    def admit_web(self, chat, user, text, *, base):
+        """Queue a message from the web page, with IDs Telegram updates never reach."""
+        with self.db:
+            newest = self.db.execute(
+                "SELECT max(id) FROM inbox WHERE instance=? AND id>=? AND id<?",
+                (self.instance, base, 2**60),
+            ).fetchone()[0]
+            identifier = max(newest or 0, base) + 1
+            self.db.execute(
+                "INSERT INTO inbox VALUES(?,?,?,?,?,'pending',NULL,?,0,?)",
+                (self.instance, identifier, chat, user, text, time.time(), user),
+            )
+            route = self.conversation(chat, user, 0)
+            self.db.execute(
+                "INSERT INTO messages(instance,route,direction,text,platform_id,created) "
+                "VALUES(?,?,'inbound',?,?,?)",
+                (self.instance, route.id, text, f"web-{identifier}", time.time()),
+            )
+        return identifier
+
+    def history(self, chat, user, limit=100):
+        route = self.conversation(chat, user, 0)
+        rows = self.db.execute(
+            "SELECT direction,text,created FROM messages WHERE instance=? AND route=? "
+            "AND text IS NOT NULL ORDER BY id DESC LIMIT ?",
+            (self.instance, route.id, limit),
+        ).fetchall()
+        return [dict(direction=d, text=t, created=c) for d, t, c in reversed(rows)]
+
     def plugins_for(self, bot):
         return [
             row[0]

@@ -52,6 +52,11 @@ HELP = (
 class Service:
     def __init__(self, config, telegram, *, factory=None):
         self.config, self.telegram = config, telegram
+        self.web = None
+        if config.web_port is not None:
+            from delta_gateway.web import WebChannel
+
+            self.telegram = WebChannel(telegram)
         self.store = Store(
             config.database_path, config.instance, retention_days=config.retention_days
         )
@@ -192,6 +197,21 @@ class Service:
         except RuntimeError:
             allow = False
         await self.resolve_card(handle, allow, "user")
+
+    async def decide_web(self, handle, allow, chat, actor):
+        """Settle an approval from the web page; only the asker's own cards count."""
+        card = self.cards.get(handle)
+        if not card or card["key"][0] != chat or card["actor"] != actor:
+            return False
+        allow = allow and time.time() < card["event"]["expires_at"]
+        try:
+            await card["client"].request(
+                "respond_to_approval", approvalId=card["event"]["approval_id"], allow=allow
+            )
+        except RuntimeError:
+            allow = False
+        await self.resolve_card(handle, allow, "user")
+        return True
 
     async def prompt(self, item, text=None, behavior=None):
         route = self.store.conversation(*item.key)
@@ -1039,7 +1059,17 @@ class Service:
     async def cleanup_idle(self):
         await self.sessions.cleanup()
 
+    async def start_web(self):
+        from delta_gateway.web import WebServer
+
+        self.web = WebServer(
+            self, self.telegram, host=self.config.web_host, port=self.config.web_port
+        )
+        await self.web.start()
+
     async def run(self):
+        if self.config.web_port is not None:
+            await self.start_web()
         if hasattr(self.telegram, "start"):
             await self.telegram.start(lambda _: self.dispatch(), self.callback)
         bot = await self.telegram.call("getMe")
@@ -1119,6 +1149,8 @@ class Service:
         await asyncio.gather(*running, return_exceptions=True)
         if self.memory:
             self.memory.close()
+        if self.web:
+            await self.web.close()
         await self.sessions.close()
         await self.team.plugins.close()
         for user in self.config.users:

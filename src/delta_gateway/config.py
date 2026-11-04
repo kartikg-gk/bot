@@ -50,6 +50,8 @@ class Config(BaseModel):
     docker_image: str | None = None
     docker_memory: str = "2g"
     daytona_target: str | None = None
+    web_host: str = "127.0.0.1"
+    web_port: int | None = Field(default=None, ge=0, le=65535)
     daytona_snapshot: str | None = None
     memory_enabled: bool = False
     memory_extract: bool = False
@@ -147,6 +149,7 @@ def document(config):
             tokenBudget=config.memory_token_budget,
             extractionSeconds=config.memory_extraction_seconds,
         ),
+        web=dict(host=config.web_host, port=config.web_port),
         retentionDays=config.retention_days,
         shutdownTimeout=config.shutdown_timeout,
         releaseUrl=config.release_url,
@@ -179,6 +182,7 @@ def load(path, *, require_project=True):
             "delta",
             "limits",
             "memory",
+            "web",
             "retentionDays",
             "shutdownTimeout",
             "releaseUrl",
@@ -186,6 +190,7 @@ def load(path, *, require_project=True):
             raise ValueError("Unknown configuration version or fields")
         t, d, limits = raw["telegram"], raw.get("delta", {}), raw.get("limits", {})
         m = raw.get("memory", {})
+        w = raw.get("web", {})
         for value, allowed in (
             (
                 t,
@@ -221,6 +226,7 @@ def load(path, *, require_project=True):
                 },
             ),
             (limits, {"workers", "backlog"}),
+            (w, {"host", "port"}),
             (
                 m,
                 {
@@ -259,6 +265,8 @@ def load(path, *, require_project=True):
             docker_memory=d.get("dockerMemory", "2g"),
             daytona_target=d.get("daytonaTarget"),
             daytona_snapshot=d.get("daytonaSnapshot"),
+            web_host=w.get("host", "127.0.0.1"),
+            web_port=w.get("port"),
             memory_enabled=m.get("enabled", False),
             memory_extract=m.get("extract", False),
             memory_extractor=m.get("extractor", "mem0"),
