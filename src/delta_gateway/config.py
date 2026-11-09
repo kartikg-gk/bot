@@ -31,6 +31,19 @@ class Config(BaseModel):
     session_dir: Path | None = None
     workers: int | None = Field(default=None, ge=1, le=256)
     backlog: int | None = Field(default=None, ge=1, le=10000)
+    model_requests_per_run: int = Field(default=100, ge=1)
+    model_requests_per_day: int = Field(default=1000, ge=1)
+    model_spend_micros_per_run: StrictInt | None = Field(default=None, ge=1, le=10**12)
+    model_spend_micros_per_day: StrictInt | None = Field(default=None, ge=1, le=10**12)
+    model_attempt_max_micros: dict[str, StrictInt] = Field(default_factory=dict)
+
+    @property
+    def spend_metered(self):
+        return (
+            self.model_spend_micros_per_run is not None
+            or self.model_spend_micros_per_day is not None
+        )
+
     idle_seconds: int = Field(default=1800, ge=1)
     trust_project: bool = False
     policy: str = Field(default="ask", pattern=r"^(engine|ask|deny|auto)$")
@@ -50,9 +63,15 @@ class Config(BaseModel):
     docker_image: str | None = None
     docker_memory: str = "2g"
     daytona_target: str | None = None
+    web_only: bool = False
+    web_auth: str = Field(default="bearer", pattern=r"^(bearer|google)$")
+    web_origin: str | None = None
+    web_allowed_emails: list[str] = Field(default_factory=list)
+    web_allowed_domains: list[str] = Field(default_factory=list)
     web_host: str = "127.0.0.1"
     web_port: int | None = Field(default=None, ge=0, le=65535)
     daytona_snapshot: str | None = None
+    daytona_archive_minutes: int = Field(default=60, ge=1)
     memory_enabled: bool = False
     memory_extract: bool = False
     memory_extractor: str = Field(default="mem0", pattern=r"^(mem0|delta)$")
@@ -89,6 +108,12 @@ class Config(BaseModel):
             raise ValueError("State, database and session paths must be absolute")
         if self.agent_dir and not self.agent_dir.is_absolute():
             raise ValueError("Agent directory must be absolute")
+        if self.web_only and self.web_port is None:
+            raise ValueError("Web-only mode needs a web port")
+        if self.web_auth == "google" and (
+            not self.web_only or self.executor not in {"docker", "daytona"}
+        ):
+            raise ValueError("Google sign-in requires standalone web mode with Docker or Daytona")
         if self.executor == "docker" and not self.docker_image:
             raise ValueError("The docker executor needs a container image")
         if self.release_url:
@@ -137,8 +162,17 @@ def document(config):
             dockerMemory=config.docker_memory,
             daytonaTarget=config.daytona_target,
             daytonaSnapshot=config.daytona_snapshot,
+            daytonaArchiveMinutes=config.daytona_archive_minutes,
         ),
-        limits=dict(workers=config.workers, backlog=config.backlog),
+        limits=dict(
+            workers=config.workers,
+            backlog=config.backlog,
+            modelRequestsPerRun=config.model_requests_per_run,
+            modelRequestsPerDay=config.model_requests_per_day,
+            modelSpendMicrosPerRun=config.model_spend_micros_per_run,
+            modelSpendMicrosPerDay=config.model_spend_micros_per_day,
+            modelAttemptMaxMicros=config.model_attempt_max_micros,
+        ),
         memory=dict(
             enabled=config.memory_enabled,
             extract=config.memory_extract,
@@ -149,7 +183,15 @@ def document(config):
             tokenBudget=config.memory_token_budget,
             extractionSeconds=config.memory_extraction_seconds,
         ),
-        web=dict(host=config.web_host, port=config.web_port),
+        web=dict(
+            host=config.web_host,
+            port=config.web_port,
+            standalone=config.web_only,
+            auth=config.web_auth,
+            origin=config.web_origin,
+            allowedEmails=config.web_allowed_emails,
+            allowedDomains=config.web_allowed_domains,
+        ),
         retentionDays=config.retention_days,
         shutdownTimeout=config.shutdown_timeout,
         releaseUrl=config.release_url,
@@ -223,10 +265,25 @@ def load(path, *, require_project=True):
                     "dockerMemory",
                     "daytonaTarget",
                     "daytonaSnapshot",
+                    "daytonaArchiveMinutes",
                 },
             ),
-            (limits, {"workers", "backlog"}),
-            (w, {"host", "port"}),
+            (
+                limits,
+                {
+                    "workers",
+                    "backlog",
+                    "modelRequestsPerRun",
+                    "modelRequestsPerDay",
+                    "modelSpendMicrosPerRun",
+                    "modelSpendMicrosPerDay",
+                    "modelAttemptMaxMicros",
+                },
+            ),
+            (
+                w,
+                {"host", "port", "standalone", "auth", "origin", "allowedEmails", "allowedDomains"},
+            ),
             (
                 m,
                 {
@@ -265,8 +322,14 @@ def load(path, *, require_project=True):
             docker_memory=d.get("dockerMemory", "2g"),
             daytona_target=d.get("daytonaTarget"),
             daytona_snapshot=d.get("daytonaSnapshot"),
+            daytona_archive_minutes=d.get("daytonaArchiveMinutes", 60),
             web_host=w.get("host", "127.0.0.1"),
             web_port=w.get("port"),
+            web_only=w.get("standalone", False),
+            web_auth=w.get("auth", "bearer"),
+            web_origin=w.get("origin"),
+            web_allowed_emails=w.get("allowedEmails", []),
+            web_allowed_domains=w.get("allowedDomains", []),
             memory_enabled=m.get("enabled", False),
             memory_extract=m.get("extract", False),
             memory_extractor=m.get("extractor", "mem0"),
@@ -284,6 +347,11 @@ def load(path, *, require_project=True):
             draft_previews=t.get("draftPreviews", True),
             workers=limits.get("workers"),
             backlog=limits.get("backlog"),
+            model_requests_per_run=limits.get("modelRequestsPerRun", 100),
+            model_requests_per_day=limits.get("modelRequestsPerDay", 1000),
+            model_spend_micros_per_run=limits.get("modelSpendMicrosPerRun"),
+            model_spend_micros_per_day=limits.get("modelSpendMicrosPerDay"),
+            model_attempt_max_micros=limits.get("modelAttemptMaxMicros", {}),
             retention_days=raw.get("retentionDays"),
             shutdown_timeout=raw.get("shutdownTimeout", 10),
             release_url=raw.get("releaseUrl"),

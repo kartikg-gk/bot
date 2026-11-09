@@ -18,7 +18,7 @@ from delta_gateway.service import Service
 from delta_gateway.store import Store
 from tests.test_gateway import Bot, config, settle, update
 
-pytest.importorskip("qdrant_client")
+pytest.importorskip("qdrant_client", exc_type=ImportError)
 
 
 def embed(texts):

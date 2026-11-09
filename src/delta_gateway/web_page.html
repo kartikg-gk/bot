@@ -15,6 +15,16 @@
     --accent: #5fbfa8; --accent-fg: #0d1513; --you: #1d2d29; --warn: #e8b36e; color-scheme: dark; }
 }
 * { box-sizing: border-box; }
+.avatar { display:inline-grid;place-items:center;width:32px;height:32px;background:var(--accent);color:white;margin-right:8px; }
+.avatar.orb { border-radius:50%; }
+.avatar.square { border-radius:6px; }
+.avatar.diamond { clip-path:polygon(50% 0,100% 50%,50% 100%,0 50%); }
+.avatar.working { animation:breathe 1.4s ease-in-out infinite alternate; }
+@keyframes breathe { from { opacity:.45; transform:scale(.9); } to { opacity:1; transform:scale(1.1); } }
+@media (prefers-reduced-motion:reduce) { .avatar.working { animation:none; } }
+dialog { color:var(--fg);background:var(--panel);max-width:600px;width:90vw;border:1px solid var(--line);border-radius:8px; }
+dialog label { display:grid;gap:4px; }
+header select, dialog input, dialog select { font:inherit;max-width:100%; }
 body { margin: 0; background: var(--bg); color: var(--fg); height: 100vh; display: grid;
   grid-template-columns: 1fr 280px; }
 main { display: grid; grid-template-rows: auto 1fr auto; min-width: 0; height: 100vh; }
@@ -40,7 +50,7 @@ aside h2 { font-size: 14px; margin: 0 0 8px; color: var(--muted); text-transform
 .task { padding: 6px 0; border-bottom: 1px solid var(--line); font-size: 13px; }
 .task b { font-variant-numeric: tabular-nums; }
 #login { position: fixed; inset: 0; background: var(--bg); display: grid; place-items: center; }
-#login[hidden] { display: none; }
+#login[hidden], #login [hidden] { display: none; }
 #login form { border: 1px solid var(--line); border-radius: 8px; background: var(--panel);
   flex-direction: column; width: min(360px, 90vw); }
 #login input { padding: 10px; border: 1px solid var(--line); border-radius: 6px; font: inherit;
@@ -51,7 +61,18 @@ aside h2 { font-size: 14px; margin: 0 0 8px; color: var(--muted); text-transform
 </head>
 <body>
 <main>
-  <header>Delta Gateway</header>
+  <header><span id="bot-avatar" class="avatar orb" aria-hidden="true">◇</span>
+    <select id="bot-picker" aria-label="Choose bot"></select>
+    <button id="new-bot" type="button">New bot</button>
+    <button id="edit-bot" type="button">Settings</button>
+    <button id="greet-bot" type="button">Greeting</button>
+    <button id="skills-button" type="button">Skills</button>
+    <button id="notes-button" type="button">Notes</button>
+    <button id="jobs-button" type="button">Jobs</button>
+    <button id="account-button" type="button" hidden>Account</button>
+    <button id="apps-button" type="button" hidden>Apps</button>
+    <button id="logout-button" type="button" hidden>Sign out</button>
+  </header>
   <div id="log" aria-live="polite"></div>
   <form id="compose">
     <textarea id="text" placeholder="Message your bot, or a /command" required></textarea>
@@ -59,10 +80,106 @@ aside h2 { font-size: 14px; margin: 0 0 8px; color: var(--muted); text-transform
   </form>
 </main>
 <aside>
-  <h2>Background tasks</h2>
+  <h2>Active runs</h2>
+  <div id="active-runs">No active runs.</div>
+  <p id="last-run-usage" class="task"></p>
+  <h2 style="margin-top:20px">Pending approvals</h2>
+  <div id="pending-approvals">No pending approvals.</div>
+  <p id="run-controls-error" role="status"></p>
+  <h2 style="margin-top:20px">Background tasks</h2>
   <div id="tasks">No tasks yet.</div>
+  <h2 style="margin-top: 20px">Live tool activity</h2>
+  <div id="activity">No tool calls yet.</div>
 </aside>
+<dialog id="bot-dialog">
+  <form id="bot-form" style="display:grid">
+    <h2 id="bot-form-title">Bot settings</h2>
+    <label>Name <input name="name" required maxlength="100"></label>
+    <label>Purpose <input name="role" required maxlength="10000"></label>
+    <label>Instructions <textarea name="instructions" maxlength="10000"></textarea></label>
+    <label>Speaking style <select name="style"><option>direct</option><option>thoughtful</option><option>upbeat</option><option>custom</option></select></label>
+    <label>Custom voice <textarea name="voice" maxlength="2000"></textarea></label>
+    <label>Avatar color <input name="color" type="color"></label>
+    <label>Avatar shape <select name="shape"><option>orb</option><option>diamond</option><option>square</option></select></label>
+    <p id="bot-error" role="alert"></p>
+    <button type="submit">Save</button>
+    <button id="delete-bot" type="button">Delete bot</button>
+    <button id="close-bot" type="button">Close</button>
+  </form>
+</dialog>
+<dialog id="skills-dialog">
+  <form id="skills-form" style="display:grid">
+    <h2>Skills</h2>
+    <label>Store <select id="skills-scope"><option value="bot">This bot</option><option value="global">Shared</option></select></label>
+    <label>Catalog <select id="skills-list"></select></label>
+    <p id="skill-description"></p>
+    <label>Name <input id="skill-name" required pattern="[a-z0-9][a-z0-9-]{0,63}"></label>
+    <label>Files (JSON map of relative paths to text)<textarea id="skill-files" rows="14" required spellcheck="false"></textarea></label>
+    <p id="skills-error" role="alert"></p>
+    <button type="submit">Save package</button>
+    <button id="skill-new" type="button">New skill</button>
+    <button id="skill-delete" type="button">Remove from this store</button>
+    <button id="skills-close" type="button">Close</button>
+  </form>
+</dialog>
+<dialog id="notes-dialog">
+  <form id="notes-form" style="display:grid">
+    <h2>Bot notes</h2>
+    <label>File <select id="notes-file"><option>PREFERENCES.md</option><option>KNOWLEDGE.md</option></select></label>
+    <label>Text <textarea id="notes-text" rows="16"></textarea></label>
+    <p id="notes-error" role="alert"></p>
+    <button type="submit">Save notes</button>
+    <button id="notes-close" type="button">Close</button>
+  </form>
+</dialog>
+<dialog id="jobs-dialog">
+  <form id="jobs-form" style="display:grid">
+    <h2>Scheduled jobs</h2>
+    <p id="scheduler-status"></p>
+    <button id="job-automation" type="button" disabled>Pause automatic wake-ups</button>
+    <label>Job <select id="jobs-list"></select></label>
+    <p id="job-summary"></p>
+    <label>Bot <select id="job-bot" required></select></label>
+    <label>Timing <input id="job-when" placeholder="every 30m, at ISO time, or on event-name"></label>
+    <label>Task <textarea id="job-task" maxlength="16000" required></textarea></label>
+    <label>Missed runs <select id="job-missed"><option value="run">Run once when available</option><option value="skip">Skip after five minutes</option></select></label>
+    <pre id="job-result" style="white-space:pre-wrap;overflow-wrap:anywhere;max-height:12rem;overflow:auto"></pre>
+    <pre id="job-wakeups" style="white-space:pre-wrap;overflow-wrap:anywhere"></pre>
+    <p id="job-error" role="alert"></p>
+    <div style="display:flex;flex-wrap:wrap;gap:8px">
+      <button id="job-save" type="submit">Save job</button>
+      <button id="job-new" type="button">New job</button>
+      <button id="job-pause" type="button">Pause future runs</button>
+      <button id="job-cancel" type="button">Cancel job</button>
+      <button id="job-refresh" type="button">Refresh</button>
+      <button id="job-close" type="button">Close</button>
+    </div>
+  </form>
+</dialog>
+<dialog id="apps-dialog">
+  <section style="padding:1rem">
+    <h2>Connected apps</h2>
+    <div id="apps-list"></div>
+    <p id="apps-status" role="status"></p>
+    <button id="apps-close" type="button">Close</button>
+  </section>
+</dialog>
+<dialog id="account-dialog">
+  <form id="account-form" style="display:grid">
+    <h2>Account settings</h2>
+    <p id="account-email"></p>
+    <label>Provider <select id="account-provider"><option value="openai">OpenAI</option><option value="anthropic">Anthropic</option><option value="openrouter">OpenRouter</option></select></label>
+    <label>Model ID <input id="account-model" required maxlength="200"></label>
+    <label>API key <input id="account-key" type="password" autocomplete="off" maxlength="4096"></label>
+    <p id="account-key-status"></p>
+    <p id="account-error" role="alert"></p>
+    <button type="submit">Save model settings</button>
+    <button id="account-remove" type="button">Remove saved key</button>
+    <button id="account-close" type="button">Close</button>
+  </form>
+</dialog>
 <div id="login" hidden>
+  <a id="google-login" href="/auth/login" hidden>Continue with Google</a>
   <form id="token-form">
     <label for="token">Web token</label>
     <input id="token" type="password" autocomplete="current-password" required>
@@ -76,40 +193,134 @@ const log = document.getElementById("log");
 const drafts = document.createElement("div");
 drafts.className = "draft";
 const shown = new Map();
+const activity = document.getElementById("activity");
+const toolRows = new Map();
+
+function showTool(record) {
+  let item = toolRows.get(record.id);
+  if (!item) {
+    if (!toolRows.size) activity.replaceChildren();
+    item = { row: document.createElement("div"), path: "" };
+    item.row.className = "task";
+    toolRows.set(record.id, item);
+    activity.prepend(item.row);
+    if (toolRows.size > 30) {
+      const oldest = toolRows.keys().next().value;
+      toolRows.get(oldest).row.remove();
+      toolRows.delete(oldest);
+    }
+  }
+  item.path = record.path || item.path;
+  item.row.textContent = record.name + " · " + record.status +
+    (item.path ? " · " + item.path : "");
+}
 
 function api(path, options = {}) {
   return fetch(path, { ...options, headers: { ...(options.headers || {}),
     Authorization: "Bearer " + token, "Content-Type": "application/json" } });
 }
 
-function add(text, you, id, buttons = []) {
+function add(text, you, id) {
   const box = document.createElement("div");
   box.className = "message" + (you ? " you" : "");
   box.textContent = text;
-  if (buttons.length) {
-    const row = document.createElement("div");
-    row.className = "buttons";
-    for (const button of buttons) {
-      const element = document.createElement("button");
-      element.textContent = button.text;
-      element.className = button.data.startsWith("d:") ? "quiet" : "";
-      element.onclick = async () => {
-        row.remove();
-        await api("/api/approvals", { method: "POST",
-          body: JSON.stringify({ data: button.data, allow: button.data.startsWith("a:") }) });
-      };
-      row.append(element);
-    }
-    box.append(row);
-  }
   log.insertBefore(box, drafts.isConnected ? drafts : null);
   if (id) shown.set(id, box);
   log.scrollTop = log.scrollHeight;
 }
 
+let runControlsVersion = 0;
+let activeRunSignature = "[]";
+let usageRunSignature;
+const runControlsError = document.getElementById("run-controls-error");
+
+function controlButton(label, action) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.textContent = label;
+  button.onclick = async () => {
+    const controls = button.parentElement.querySelectorAll("button");
+    for (const control of controls) control.disabled = true;
+    runControlsError.textContent = "";
+    try { await action(); }
+    catch (error) { runControlsError.textContent = error.message; }
+    finally {
+      await loadRunControls();
+      for (const control of controls) control.disabled = false;
+    }
+  };
+  return button;
+}
+
+async function loadRunControls() {
+  const version = ++runControlsVersion;
+  try {
+    const [runs, approvals] = await Promise.all([
+      botRequest("/api/runs"), botRequest("/api/approvals")
+    ]);
+    if (version !== runControlsVersion) return;
+    const signature = JSON.stringify(runs.map(run => [run.id, run.status]));
+    if (signature !== activeRunSignature) {
+      await refreshBots();
+      if (version !== runControlsVersion) return;
+      activeRunSignature = signature;
+      if (!selectedBot?.busy) drafts.remove();
+    }
+    if (signature !== usageRunSignature) {
+      const recent = await botRequest("/api/runs?recent=1");
+      if (version !== runControlsVersion) return;
+      usageRunSignature = signature;
+      const completed = recent.find(run => run.usage);
+      if (completed) {
+        const usage = completed.usage;
+        document.getElementById("last-run-usage").textContent =
+          botNameForRun(completed.bot) + " · " + usage.input + " input · " + usage.output +
+          " output · " + usage.cache_read + " cache read · " + usage.cache_write +
+          " cache write · $" + usage.cost_usd.toFixed(6) + " reported" +
+          (usage.reserved_micros === undefined ? "" :
+            " · $" + (usage.reserved_micros / 1000000).toFixed(6) + " reserved");
+      }
+    }
+    const active = document.getElementById("active-runs");
+    active.replaceChildren(...runs.map(run => {
+      const row = document.createElement("div");
+      row.className = "task";
+      row.textContent = botNameForRun(run.bot) + " · " + run.status + " · " + run.id.slice(0, 8) + " ";
+      if (run.status !== "cancelling") row.append(controlButton("Stop", () =>
+        botRequest("/api/bots/" + run.bot + "/runs/" + run.id + "/stop", {method:"POST"})));
+      return row;
+    }));
+    if (!runs.length) active.textContent = "No active runs.";
+    const pending = document.getElementById("pending-approvals");
+    pending.replaceChildren(...approvals.map(approval => {
+      const row = document.createElement("div");
+      row.className = "task";
+      const title = document.createElement("b");
+      title.textContent = botNameForRun(approval.bot) + " · " + approval.tool;
+      const preview = document.createElement("pre");
+      preview.style.whiteSpace = "pre-wrap";
+      preview.textContent = approval.preview;
+      const decide = allow => botRequest("/api/approvals", {method:"POST", body:JSON.stringify({
+        data:(allow ? "a:" : "d:") + approval.id, allow
+      })});
+      row.append(title, preview, controlButton("Approve once", () => decide(true)),
+        controlButton("Deny", () => decide(false)));
+      return row;
+    }));
+    if (!approvals.length) pending.textContent = "No pending approvals.";
+  } catch (error) {
+    if (version === runControlsVersion) runControlsError.textContent = error.message;
+  }
+}
+
+function botNameForRun(id) {
+  return bots.find(bot => bot.id === id)?.name || "Bot";
+}
+
 async function follow() {
   const response = await api("/api/stream");
   if (!response.ok) throw new Error(response.status);
+  loadRunControls();
   const reader = response.body.pipeThrough(new TextDecoderStream()).getReader();
   let buffer = "";
   for (;;) {
@@ -122,15 +333,22 @@ async function follow() {
       buffer = buffer.slice(end + 2);
       if (!chunk.startsWith("data: ")) continue;
       const record = JSON.parse(chunk.slice(6));
-      if (record.type === "message" && record.text !== "Working…") {
+      if (record.type === "message" && record.buttons?.length) {
+        loadRunControls();
+      } else if (record.type === "message" && record.text !== "Working…") {
+        document.getElementById("bot-avatar").classList.remove("working");
         drafts.remove();
-        add(record.text, false, record.id, record.buttons);
+        add(record.text, false, record.id);
+        loadRunControls();
       } else if (record.type === "draft") {
+        document.getElementById("bot-avatar").classList.add("working");
         drafts.textContent = record.text;
         log.append(drafts);
         log.scrollTop = log.scrollHeight;
       } else if (record.type === "edit" && shown.has(record.id)) {
         shown.get(record.id).textContent = record.text;
+      } else if (record.type === "tool") {
+        showTool(record);
       } else if (record.type === "file") {
         add("File " + record.name + " (" + record.content.length + " characters)", false);
       }
@@ -156,6 +374,22 @@ async function loadTasks() {
 }
 
 async function open() {
+  const identity = await (await fetch("/auth/session")).json();
+  googleMode = identity.mode === "google";
+  document.getElementById("token-form").hidden = googleMode;
+  document.getElementById("google-login").hidden = !googleMode;
+  if (googleMode) {
+    token = "";
+    if (!identity.email) {
+      document.getElementById("login").hidden = false;
+      return;
+    }
+    document.getElementById("account-email").textContent = identity.email;
+    document.getElementById("account-button").hidden = false;
+    document.getElementById("apps-button").hidden = false;
+    document.getElementById("logout-button").hidden = false;
+    await loadAccountSettings();
+  }
   const response = await api("/api/messages");
   if (response.status === 401) {
     document.getElementById("login").hidden = false;
@@ -163,8 +397,18 @@ async function open() {
   }
   document.getElementById("login").hidden = true;
   for (const row of await response.json()) add(row.text, row.direction === "inbound");
+  await refreshBots();
+  if (selectedBot && !(await loadBotChat()) && !log.children.length) {
+    if (!googleMode || accountSettings.provider) await greetBot();
+    else add("Open Account settings to choose a model and save an API key.", false);
+  }
+  if (googleMode && new URL(location.href).searchParams.has("apps")) {
+    history.replaceState(null, "", "/");
+    await openApps();
+  }
   loadTasks();
   setInterval(loadTasks, 5000);
+  setInterval(loadRunControls, 2500);
   for (;;) {
     try { await follow(); } catch (error) { /* reconnect below */ }
     await new Promise((resolve) => setTimeout(resolve, 2000));
@@ -185,8 +429,14 @@ document.getElementById("compose").onsubmit = async (event) => {
   if (!text) return;
   field.value = "";
   add(text, true);
+  document.getElementById("bot-avatar").classList.add("working");
   const response = await api("/api/messages", { method: "POST", body: JSON.stringify({ text }) });
-  if (!response.ok) add("Not sent: " + (await response.json()).error, false);
+  if (!response.ok) {
+    document.getElementById("bot-avatar").classList.remove("working");
+    add("Not sent: " + (await response.json()).error, false);
+  } else {
+    await loadRunControls();
+  }
 };
 
 document.getElementById("text").addEventListener("keydown", (event) => {
@@ -195,6 +445,494 @@ document.getElementById("text").addEventListener("keydown", (event) => {
     document.getElementById("compose").requestSubmit();
   }
 });
+
+let bots = [];
+let selectedBot = null;
+let editingBot = null;
+const picker = document.getElementById("bot-picker");
+const botDialog = document.getElementById("bot-dialog");
+const botForm = document.getElementById("bot-form");
+
+async function botRequest(path, options = {}) {
+  const response = await api(path, options);
+  if (!response.ok) throw new Error(await response.text());
+  return response.json();
+}
+
+function showAvatar(bot) {
+  const avatar = document.getElementById("bot-avatar");
+  avatar.className = "avatar " + bot.shape + (bot.busy ? " working" : "");
+  avatar.style.backgroundColor = bot.color;
+}
+
+async function refreshBots(preferred) {
+  bots = await botRequest("/api/bots");
+  picker.replaceChildren(...bots.map(bot => {
+    const option = document.createElement("option");
+    option.value = bot.id;
+    option.textContent = bot.name + (bot.busy ? " · working" : "");
+    return option;
+  }));
+  selectedBot = bots.find(bot => bot.id === preferred) || bots.find(bot => bot.selected) || bots[0];
+  if (selectedBot) { picker.value = selectedBot.id; showAvatar(selectedBot); }
+}
+
+async function loadBotChat() {
+  const messages = await botRequest("/api/bots/" + selectedBot.id + "/messages");
+  // Older installations can still show their original route transcript.
+  if (!messages.length) return false;
+  log.replaceChildren(); shown.clear(); drafts.remove();
+  for (const message of messages) add(message.text, message.role === "user");
+  return true;
+}
+
+picker.onchange = async () => {
+  const previous = selectedBot;
+  try {
+    selectedBot = await botRequest("/api/bots/" + picker.value + "/select", {method:"POST"});
+    log.replaceChildren(); shown.clear(); drafts.remove();
+    if (!(await loadBotChat())) await greetBot();
+    showAvatar(selectedBot);
+  } catch (error) {
+    selectedBot = previous; picker.value = previous.id; add(error.message, false);
+  }
+};
+
+function editBot(bot) {
+  editingBot = bot;
+  botForm.reset();
+  const defaults = {name:"",role:"",instructions:"",style:"direct",voice:"",color:"#" + Array.from(crypto.getRandomValues(new Uint8Array(3)), n => n.toString(16).padStart(2,"0")).join(""),shape:"orb"};
+  for (const [key, value] of Object.entries(defaults)) botForm.elements[key].value = bot?.[key] ?? value;
+  document.getElementById("delete-bot").hidden = !bot || bot.chief;
+  document.getElementById("bot-error").textContent = "";
+  botDialog.showModal();
+}
+document.getElementById("new-bot").onclick = () => editBot(null);
+document.getElementById("edit-bot").onclick = () => editBot(selectedBot);
+document.getElementById("close-bot").onclick = () => botDialog.close();
+botForm.onsubmit = async event => {
+  event.preventDefault();
+  try {
+    const body = Object.fromEntries(new FormData(botForm));
+    const bot = await botRequest("/api/bots" + (editingBot ? "/" + editingBot.id : ""),
+      {method:editingBot ? "PATCH" : "POST",body:JSON.stringify(body)});
+    botDialog.close(); await refreshBots(bot.id); await picker.onchange();
+  } catch (error) { document.getElementById("bot-error").textContent = error.message; }
+};
+document.getElementById("delete-bot").onclick = async () => {
+  if (!editingBot || !confirm("Delete " + editingBot.name + " and its remote computer?")) return;
+  try {
+    await botRequest("/api/bots/" + editingBot.id, {method:"DELETE"});
+    botDialog.close(); await refreshBots(); await picker.onchange();
+  } catch (error) { document.getElementById("bot-error").textContent = error.message; }
+};
+async function greetBot() {
+  if (!selectedBot) return;
+  try { add((await botRequest("/api/bots/" + selectedBot.id + "/greeting", {method:"POST"})).text, false); }
+  catch (error) { add(error.message, false); }
+}
+document.getElementById("greet-bot").onclick = greetBot;
+
+
+const skillsDialog = document.getElementById("skills-dialog");
+const skillsList = document.getElementById("skills-list");
+const skillFiles = document.getElementById("skill-files");
+const skillName = document.getElementById("skill-name");
+const skillError = document.getElementById("skills-error");
+let catalog = [];
+function skillPath() {
+  return document.getElementById("skills-scope").value === "global" ? "/api/skills" :
+    "/api/bots/" + selectedBot.id + "/skills";
+}
+async function showSkill() {
+  skillError.textContent = "";
+  const entry = catalog.find(skill => skill.name === skillsList.value);
+  if (!entry) { newSkill(); return; }
+  document.getElementById("skill-description").textContent = entry.description +
+    (entry.managed ? "" : " · Saving creates a copy in this store.");
+  document.getElementById("skill-delete").disabled = !entry.managed;
+  try {
+    const data = await botRequest(skillPath() + "/" + encodeURIComponent(entry.name));
+    skillName.value = data.name;
+    skillFiles.value = JSON.stringify(data.files, null, 2);
+  } catch (error) { skillError.textContent = error.message; }
+}
+function newSkill() {
+  skillName.value = "new-skill";
+  skillFiles.value = JSON.stringify({"SKILL.md":"---\nname: new-skill\ndescription: Describe when to use this skill.\n---\nWrite the steps here.\n"}, null, 2);
+  document.getElementById("skill-description").textContent = "Edit the name in both fields before saving.";
+  document.getElementById("skill-delete").disabled = true;
+}
+async function refreshSkills(preferred) {
+  catalog = await botRequest(skillPath());
+  skillsList.replaceChildren(...catalog.map(skill => {
+    const option = document.createElement("option");
+    option.value = skill.name; option.textContent = skill.name + (skill.disabled ? " · manual" : "");
+    return option;
+  }));
+  if (preferred && catalog.some(s => s.name === preferred)) skillsList.value = preferred;
+  await showSkill();
+}
+document.getElementById("skills-button").onclick = async () => {
+  if (!selectedBot) return;
+  skillsDialog.showModal();
+  try { await refreshSkills(); } catch (error) { skillError.textContent = error.message; }
+};
+document.getElementById("skills-scope").onchange = () => refreshSkills().catch(e => skillError.textContent = e.message);
+skillsList.onchange = showSkill;
+document.getElementById("skill-new").onclick = newSkill;
+document.getElementById("skills-close").onclick = () => skillsDialog.close();
+document.getElementById("skills-form").onsubmit = async event => {
+  event.preventDefault();
+  try {
+    await botRequest(skillPath(), {method:"POST", body:JSON.stringify({name:skillName.value,files:JSON.parse(skillFiles.value)})});
+    await refreshSkills(skillName.value);
+  } catch (error) { skillError.textContent = error.message; }
+};
+document.getElementById("skill-delete").onclick = async () => {
+  if (!confirm("Remove " + skillsList.value + " from this store?")) return;
+  try {
+    await botRequest(skillPath() + "/" + encodeURIComponent(skillsList.value), {method:"DELETE"});
+    await refreshSkills();
+  } catch (error) { skillError.textContent = error.message; }
+};
+const notesDialog = document.getElementById("notes-dialog");
+const noteFile = document.getElementById("notes-file");
+const noteText = document.getElementById("notes-text");
+const noteError = document.getElementById("notes-error");
+let notes = {};
+document.getElementById("notes-button").onclick = async () => {
+  if (!selectedBot) return;
+  notesDialog.showModal(); noteError.textContent = "";
+  try {
+    notes = await botRequest("/api/bots/" + selectedBot.id + "/memory");
+    noteText.value = notes[noteFile.value] || "";
+  } catch (error) { noteError.textContent = error.message; }
+};
+noteFile.onchange = () => noteText.value = notes[noteFile.value] || "";
+document.getElementById("notes-close").onclick = () => notesDialog.close();
+document.getElementById("notes-form").onsubmit = async event => {
+  event.preventDefault();
+  try {
+    await botRequest("/api/bots/" + selectedBot.id + "/memory", {method:"PUT",body:JSON.stringify({file:noteFile.value,text:noteText.value})});
+    notes[noteFile.value] = noteText.value;
+    noteError.textContent = "Saved.";
+  } catch (error) { noteError.textContent = error.message; }
+};
+
+
+const jobsDialog = document.getElementById("jobs-dialog");
+const jobsList = document.getElementById("jobs-list");
+const jobBot = document.getElementById("job-bot");
+const jobWhen = document.getElementById("job-when");
+const jobTask = document.getElementById("job-task");
+const jobMissed = document.getElementById("job-missed");
+const jobError = document.getElementById("job-error");
+const jobPause = document.getElementById("job-pause");
+let editingJob = null;
+let automationEnabled = true;
+const jobAutomation = document.getElementById("job-automation");
+
+function showJob(job) {
+  editingJob = job;
+  jobBot.value = job?.bot || selectedBot?.id || "";
+  jobWhen.value = job ? "" : "every 30m";
+  jobWhen.placeholder = job ? "Leave blank to keep timing" : "every 30m, at ISO time, or on event-name";
+  jobTask.value = job?.task || "";
+  jobMissed.value = job?.missed || "run";
+  const open = job && ["active", "paused"].includes(job.status);
+  document.getElementById("job-summary").textContent = job ?
+    job.status + " · " + job.spec + (job.next_run ? " · Next " + new Date(job.next_run * 1000).toLocaleString() : "") : "";
+  document.getElementById("job-result").textContent = job?.last_status ?
+    "Last run: " + job.last_status + (job.last_answer ? "\n" + job.last_answer : "") : "";
+  document.getElementById("job-save").disabled = Boolean(job && (!open || job.running));
+  document.getElementById("job-cancel").disabled = !open && !job?.running;
+  document.getElementById("job-wakeups").textContent = (job?.wakeups || []).map(wake =>
+    wake.event + " · " + wake.delivery + " · " + wake.status).join("\n");
+  jobPause.disabled = !open;
+  jobPause.textContent = job?.status === "paused" ? "Resume job" : "Pause future runs";
+}
+
+async function readJob(id) {
+  showJob(id ? await botRequest("/api/jobs/" + id) : null);
+}
+
+async function refreshJobs(preferred) {
+  const data = await botRequest("/api/jobs");
+  automationEnabled = data.automation;
+  jobAutomation.disabled = false;
+  jobAutomation.textContent = automationEnabled ? "Pause automatic wake-ups" : "Resume automatic wake-ups";
+  const active = data.scheduler && data.scheduler.expires > Date.now() / 1000;
+  document.getElementById("scheduler-status").textContent = active ? "Scheduler online" : "Scheduler offline";
+  jobsList.replaceChildren(...data.jobs.map(job => new Option("#" + job.id + " · " + job.bot_name + " · " + job.status, job.id)));
+  if (preferred && data.jobs.some(job => job.id === preferred)) jobsList.value = preferred;
+  await readJob(jobsList.value);
+}
+
+async function withJobError(action) {
+  jobError.textContent = "";
+  try { await action(); } catch (error) { jobError.textContent = error.message; }
+}
+
+document.getElementById("jobs-button").onclick = () => withJobError(async () => {
+  jobsDialog.showModal();
+  await refreshBots(selectedBot?.id);
+  jobBot.replaceChildren(...bots.map(bot => new Option(bot.name, bot.id)));
+  await refreshJobs();
+});
+jobAutomation.onclick = () => withJobError(async () => {
+  jobAutomation.disabled = true;
+  try {
+    await botRequest("/api/jobs/automation", {method:"PUT", body:JSON.stringify({enabled:!automationEnabled})});
+    await refreshJobs(editingJob?.id);
+  } finally { jobAutomation.disabled = false; }
+});
+jobsList.onchange = () => withJobError(() => readJob(jobsList.value));
+document.getElementById("job-new").onclick = () => { jobsList.selectedIndex = -1; showJob(null); };
+document.getElementById("job-close").onclick = () => jobsDialog.close();
+document.getElementById("job-refresh").onclick = () => withJobError(() => refreshJobs(editingJob?.id));
+document.getElementById("jobs-form").onsubmit = event => {
+  event.preventDefault();
+  withJobError(async () => {
+    const body = {bot:jobBot.value,task:jobTask.value,missed:jobMissed.value};
+    if (jobWhen.value.trim()) body.when = jobWhen.value.trim();
+    const job = await botRequest(editingJob ? "/api/jobs/" + editingJob.id : "/api/jobs", {
+      method:editingJob ? "PATCH" : "POST",body:JSON.stringify(body)
+    });
+    await refreshJobs(job.id);
+  });
+};
+async function changeJob(action) {
+  if (!editingJob) return;
+  const id = editingJob.id;
+  await botRequest("/api/jobs/" + id + "/" + action, {method:"POST"});
+  await refreshJobs(id);
+}
+jobPause.onclick = () => withJobError(() => changeJob(editingJob?.status === "paused" ? "resume" : "pause"));
+document.getElementById("job-cancel").onclick = () => withJobError(() => changeJob("cancel"));
+
+
+let googleMode = false;
+let accountSettings = {};
+const accountDialog = document.getElementById("account-dialog");
+const accountProvider = document.getElementById("account-provider");
+const accountModel = document.getElementById("account-model");
+const accountKey = document.getElementById("account-key");
+const accountError = document.getElementById("account-error");
+
+function showAccountProvider() {
+  const saved = accountSettings.keys?.includes(accountProvider.value);
+  accountKey.value = "";
+  accountModel.value = accountProvider.value === accountSettings.provider ? accountSettings.model || "" : "";
+  document.getElementById("account-key-status").textContent = saved ?
+    "A key is saved. Leave the key field blank to keep it." : "Enter a key for this provider.";
+  document.getElementById("account-remove").disabled = !saved;
+}
+
+async function loadAccountSettings() {
+  accountSettings = await botRequest("/api/account/model");
+  if (accountSettings.provider) accountProvider.value = accountSettings.provider;
+  showAccountProvider();
+}
+
+document.getElementById("account-button").onclick = async () => {
+  accountDialog.showModal();
+  accountError.textContent = "";
+  try { await loadAccountSettings(); } catch (error) { accountError.textContent = error.message; }
+};
+document.getElementById("account-close").onclick = () => { accountKey.value = ""; accountDialog.close(); };
+accountDialog.addEventListener("close", () => { accountKey.value = ""; });
+accountProvider.onchange = showAccountProvider;
+document.getElementById("account-form").onsubmit = async event => {
+  event.preventDefault();
+  try {
+    const body = {provider:accountProvider.value, model:accountModel.value.trim()};
+    if (accountKey.value) body.key = accountKey.value;
+    accountSettings = await botRequest("/api/account/model", {method:"PUT",body:JSON.stringify(body)});
+    showAccountProvider();
+    accountError.textContent = "Saved.";
+  } catch (error) { accountError.textContent = error.message; }
+};
+document.getElementById("account-remove").onclick = async () => {
+  try {
+    accountSettings = await botRequest("/api/account/keys/" + accountProvider.value, {method:"DELETE"});
+    showAccountProvider();
+    accountError.textContent = "Key removed.";
+  } catch (error) { accountError.textContent = error.message; }
+};
+document.getElementById("logout-button").onclick = async () => {
+  const result = await api("/auth/logout", {method:"POST"});
+  if (result.ok) location.reload();
+};
+
+
+const appsDialog = document.getElementById("apps-dialog");
+const appsStatus = document.getElementById("apps-status");
+appsDialog.addEventListener("close", () => {
+  for (const input of appsDialog.querySelectorAll("[data-app-key]")) input.value = "";
+});
+const appLabels = {
+  github:"GitHub", gmail:"Gmail", calendar:"Google Calendar", tasks:"Google Tasks",
+  drive:"Google Drive", docs:"Google Docs", sheets:"Google Sheets", contacts:"Google Contacts",
+  notion:"Notion", linear:"Linear", todoist:"Todoist", wispr:"Wispr Flow", granola:"Granola",
+  tinyfish:"TinyFish", bland:"Bland AI",
+};
+
+async function appAction(action) {
+  appsStatus.textContent = "";
+  try { await action(); } catch (error) { appsStatus.textContent = error.message; }
+}
+
+function blandCallLookup() {
+  const form = document.createElement("form");
+  const id = document.createElement("input");
+  id.placeholder = "Bland call ID";
+  id.setAttribute("aria-label", "Bland call ID");
+  id.required = true;
+  id.maxLength = 128;
+  const lookup = document.createElement("button");
+  lookup.textContent = "Look up call";
+  const next = document.createElement("button");
+  next.type = "button";
+  next.textContent = "Next transcript page";
+  next.hidden = true;
+  const result = document.createElement("pre");
+  result.style.whiteSpace = "pre-wrap";
+  result.setAttribute("aria-live", "polite");
+  let cursor = null;
+  let activeId = "";
+  const load = (call, offset) => appAction(async () => {
+    lookup.disabled = next.disabled = true;
+    try {
+      const details = await botRequest("/api/apps/bland/calls/" +
+        encodeURIComponent(call) + "?offset=" + offset);
+      result.textContent = [details.status, details.summary, details.transcript].filter(Boolean).join("\n\n");
+      activeId = call;
+      cursor = details.nextOffset;
+      next.hidden = cursor == null;
+    } finally { lookup.disabled = next.disabled = false; }
+  });
+  form.onsubmit = event => {
+    event.preventDefault();
+    const call = id.value.trim();
+    if (call) {
+      result.textContent = "";
+      next.hidden = true;
+      load(call, 0);
+    }
+  };
+  next.onclick = () => { if (cursor != null) load(activeId, cursor); };
+  form.append(id, lookup, next, result);
+  return form;
+}
+
+async function refreshApps() {
+  const apps = await botRequest("/api/apps");
+  const rows = apps.map(app => {
+    const section = document.createElement("section");
+    const title = document.createElement("h3");
+    title.textContent = appLabels[app.id] || app.id;
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = app.saved ? "Disconnect" : "Connect";
+    button.disabled = !app.configured && !app.saved;
+    button.onclick = () => appAction(async () => {
+      button.disabled = true;
+      try {
+        if (app.saved) {
+          if (!confirm("Disconnect " + title.textContent + " from your bots?")) return;
+          const result = await botRequest("/api/apps/" + app.id, {method:"DELETE"});
+          await refreshApps();
+          if (!result.providerRevoked) appsStatus.textContent = app.id === "wispr"
+            ? "Disconnected here. Wispr Flow did not advertise a revocation endpoint."
+            : "Disconnected here. Revoke access in the provider settings.";
+        } else {
+          const result = await botRequest("/api/apps/" + app.id + "/connect", {method:"POST"});
+          location.assign(result.url);
+        }
+      } finally { button.disabled = false; }
+    });
+    const status = document.createElement("p");
+    status.textContent = app.connected ? "Connected. Choose which bots can use this app." :
+      (app.configured ? "Ready to connect." : "OAuth client setup is required on the gateway.");
+    section.append(title, status);
+    if (!app.keyAuth || app.saved) section.append(button);
+    if (app.keyAuth) {
+      const form = document.createElement("form");
+      const key = document.createElement("input");
+      key.type = "password";
+      key.autocomplete = "off";
+      key.placeholder = title.textContent + " API key";
+      key.setAttribute("aria-label", key.placeholder);
+      key.dataset.appKey = app.id;
+      key.required = true;
+      const save = document.createElement("button");
+      save.textContent = app.saved ? "Replace key" : "Save key";
+      if (app.saved) save.title = "Replacing the key resets the bot grants.";
+      form.append(key, save);
+      form.onsubmit = event => {
+        event.preventDefault();
+        const value = key.value.trim();
+        key.value = "";
+        save.disabled = true;
+        appAction(async () => {
+          try {
+            await botRequest("/api/apps/" + app.id + "/key", {
+              method:"PUT", body:JSON.stringify({key:value}),
+            });
+            await refreshApps();
+          } finally { save.disabled = false; }
+        });
+      };
+      section.append(form);
+    }
+    if (app.connected && app.id === "bland") section.append(blandCallLookup());
+    if (app.connected && app.id === "gmail") {
+      const reconnect = document.createElement("button");
+      reconnect.type = "button";
+      reconnect.textContent = "Reconnect Gmail";
+      reconnect.title = "Review permissions again, then re-enable Gmail for your bots.";
+      reconnect.onclick = () => appAction(async () => {
+        reconnect.disabled = true;
+        try {
+          const result = await botRequest("/api/apps/gmail/connect", {method:"POST"});
+          location.assign(result.url);
+        } finally { reconnect.disabled = false; }
+      });
+      section.append(reconnect);
+    }
+    if (app.connected) {
+      for (const bot of app.bots) {
+        const label = document.createElement("label");
+        label.style.display = "block";
+        const checkbox = document.createElement("input");
+        checkbox.type = "checkbox";
+        checkbox.checked = bot.enabled;
+        checkbox.onchange = () => appAction(async () => {
+          checkbox.disabled = true;
+          try {
+            const result = await botRequest("/api/apps/" + app.id + "/bots/" + bot.id, {
+              method:"PUT",body:JSON.stringify({enabled:checkbox.checked})
+            });
+            checkbox.checked = result.enabled;
+          } catch (error) { checkbox.checked = !checkbox.checked; throw error; }
+          finally { checkbox.disabled = false; }
+        });
+        label.append(checkbox, " " + bot.name);
+        section.append(label);
+      }
+    }
+    return section;
+  });
+  document.getElementById("apps-list").replaceChildren(...rows);
+}
+
+async function openApps() {
+  appsDialog.showModal();
+  await appAction(refreshApps);
+}
+document.getElementById("apps-button").onclick = openApps;
+document.getElementById("apps-close").onclick = () => appsDialog.close();
 
 open();
 </script>

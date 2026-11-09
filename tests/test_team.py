@@ -22,7 +22,15 @@ def test_only_the_chief_gets_team_tools(tmp_path, store):
     chief = prepare(c, store.bots()[0])
     worker = prepare(c, store.create_bot("Researcher", "Finds things"))
     assert any(d["name"] == "delegate_task" for d in chief.definitions)
-    assert not worker.definitions
+    assert {d["name"] for d in worker.definitions} == {
+        "update_own_bot",
+        "write_skill",
+        "read_memory",
+        "write_memory",
+        "schedule_job",
+        "list_scheduled_jobs",
+        "cancel_scheduled_job",
+    }
 
 
 def test_one_task_per_bot_and_restart_interrupts(tmp_path, store):

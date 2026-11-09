@@ -78,7 +78,10 @@ async def test_tools_read_write_edit_and_run_on_the_computer(tmp_path):
         .text
     )
     assert "three" in (await read.run("3", dict(file_path=path))).content[0].text
-    assert "absolute" in (await read.run("4", dict(file_path="relative.txt"))).content[0].text
+    assert (
+        str(tmp_path / "relative.txt")
+        in (await read.run("4", dict(file_path="relative.txt"))).content[0].text
+    )
     listing = (await bash.run("5", dict(command='python -c "print(6*7)"'))).content[0].text
     assert "42" in listing
     timed = await bash.run("6", dict(command='python -c "import time;time.sleep(5)"', timeout=200))

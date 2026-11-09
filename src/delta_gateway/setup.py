@@ -59,14 +59,14 @@ def interactive(config, options):
 
     if not getattr(options, "name", None):
         config.name = ask("Gateway name", config.name or "gateway")
-    if not getattr(options, "user", None):
+    if not config.web_only and not getattr(options, "user", None):
         config.users = [
             int(value.strip())
             for value in ask(
                 "Allowed Telegram user IDs (comma separated)", ",".join(map(str, config.users))
             ).split(",")
         ]
-    if not getattr(options, "bot_token", None):
+    if not config.web_only and not getattr(options, "bot_token", None):
         token = getpass.getpass(f"Bot token (blank keeps current / {config.token_env}): ").strip()
         if token:
             config.bot_token = SecretStr(token)

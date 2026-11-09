@@ -72,7 +72,17 @@ def config_lease(config):
 
 
 def token_variables(config):
-    names = {"TELEGRAM_BOT_TOKEN", config.token_env, *CREDENTIAL_VARIABLES}
+    names = {
+        "TELEGRAM_BOT_TOKEN",
+        "DELTA_GATEWAY_WEB_TOKEN",
+        "DELTA_GATEWAY_PROXY_SECRET",
+        "DELTA_GATEWAY_MASTER_KEY",
+        "DELTA_GATEWAY_LANGFUSE_PUBLIC_KEY",
+        "DELTA_GATEWAY_LANGFUSE_SECRET_KEY",
+        "DELTA_GATEWAY_GOOGLE_CLIENT_SECRET",
+        config.token_env,
+        *CREDENTIAL_VARIABLES,
+    }
     for entry in registry().values():
         try:
             names.add(load(entry["config"], require_project=False).token_env)

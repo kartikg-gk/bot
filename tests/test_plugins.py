@@ -35,11 +35,22 @@ async def test_github_output_is_marked_untrusted(monkeypatch):
     await runner.close()
 
 
-async def test_gmail_can_draft_but_has_no_send_tool(monkeypatch):
-    from delta_gateway.plugins import GMAIL
+async def test_gmail_draft_does_not_send():
+    async def token(app):
+        return "test-token"
 
-    names = {tool["name"] for tool in GMAIL.tools}
-    assert "gmail_create_draft" in names and not any("send" in name for name in names)
+    def provider(request):
+        assert request.method == "POST" and request.url.path == "/gmail/v1/users/me/drafts"
+        return httpx.Response(200, json={"id": "draft1"})
+
+    runner = PluginRunner(transport=httpx.MockTransport(provider), access_token=token)
+    try:
+        result = await runner.run(
+            "gmail_create_draft", {"to": "user@example.test", "subject": "Draft", "body": "Test"}
+        )
+        assert result == "Draft created. It was not sent."
+    finally:
+        await runner.close()
 
 
 async def test_only_granted_bots_can_call_a_plugin(store, monkeypatch):

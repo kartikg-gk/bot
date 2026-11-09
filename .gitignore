@@ -6,6 +6,11 @@ __pycache__/
 .state/
 *.egg-info/
 dist/
+desktop/node_modules/
+desktop/out/
+deploy/vercel/node_modules/
+deploy/vercel/.vercel/
+deploy/vercel/.env.*
 .env
 vendor/
 

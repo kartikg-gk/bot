@@ -7,6 +7,9 @@ as a conflict for the owner, since Mem0 gives no confidence to judge it by.
 
 import asyncio
 import os
+from threading import Event
+
+import httpx
 
 from delta_gateway.memory import MODEL
 
@@ -30,9 +33,10 @@ def llm_settings(provider, model):
 
 
 class Mem0Extractor:
-    def __init__(self, folder, provider, model, *, memory=None):
+    def __init__(self, folder, provider, model, *, memory=None, budget=None):
         self.folder, self.provider, self.model = folder, provider, model
-        self.mem0 = memory
+        self.mem0, self.budget = memory, budget
+        self.worker = None
         self.lock = asyncio.Lock()
 
     def load(self):
@@ -64,16 +68,75 @@ class Mem0Extractor:
             )
         return self.mem0
 
+    def metered_add(self, mem0, messages, project, owner, loop, run, stopped):
+        original = getattr(mem0.llm, "client", None)
+        copy_client = getattr(original, "with_options", None)
+        if copy_client is None:
+            raise RuntimeError("This Mem0 provider does not support spend limits.")
+
+        def reserve(request):
+            async def debit():
+                if stopped.is_set():
+                    raise RuntimeError("Memory extraction was cancelled.")
+                self.budget.reserve_http(self.provider, request, run=run)
+
+            if stopped.is_set() or loop.is_closed():
+                raise RuntimeError("Memory extraction was cancelled.")
+            reservation = debit()
+            try:
+                future = asyncio.run_coroutine_threadsafe(reservation, loop)
+            except RuntimeError:
+                reservation.close()
+                raise
+            try:
+                future.result(timeout=5)
+            except TimeoutError:
+                future.cancel()
+                raise RuntimeError("Could not reserve a charge for memory extraction.") from None
+
+        with httpx.Client(timeout=15, event_hooks={"request": [reserve]}) as client:
+            mem0.llm.client = copy_client(http_client=client, timeout=15)
+            try:
+                return mem0.add(messages, user_id=str(owner), agent_id=project)
+            finally:
+                mem0.llm.client = original
+
     async def changes(self, project, owner, user, assistant):
         """Mem0's decisions for one exchange: (event, mem0 id, text) per affected memory."""
         async with self.lock:
+            if self.worker is not None:
+                # A cancelled caller may have left a synchronous SDK request unwinding.
+                await asyncio.shield(asyncio.gather(self.worker, return_exceptions=True))
             mem0 = await asyncio.to_thread(self.load)
-            result = await asyncio.to_thread(
-                mem0.add,
-                [dict(role="user", content=user), dict(role="assistant", content=assistant)],
-                user_id=str(owner),
-                agent_id=project,
-            )
+            messages = [dict(role="user", content=user), dict(role="assistant", content=assistant)]
+            if self.budget is None:
+                result = await asyncio.to_thread(
+                    mem0.add,
+                    messages,
+                    user_id=str(owner),
+                    agent_id=project,
+                )
+            else:
+                stopped = Event()
+                self.worker = asyncio.create_task(
+                    asyncio.to_thread(
+                        self.metered_add,
+                        mem0,
+                        messages,
+                        project,
+                        owner,
+                        asyncio.get_running_loop(),
+                        self.budget.scope(),
+                        stopped,
+                    )
+                )
+                self.worker.add_done_callback(
+                    lambda done: None if done.cancelled() else done.exception()
+                )
+                try:
+                    result = await asyncio.shield(self.worker)
+                finally:
+                    stopped.set()
         return [
             (row.get("event"), row.get("id"), row.get("memory") or "")
             for row in (result or {}).get("results", [])

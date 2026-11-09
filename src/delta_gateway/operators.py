@@ -1,6 +1,7 @@
 "Configuration, lifecycle, migration, and diagnostics for named gateways."
 
 import hashlib
+import json
 import os
 import re
 import sqlite3
@@ -78,15 +79,22 @@ def configure_path(options, path):
         "idle_seconds",
         "retention_days",
         "release_url",
+        "web_only",
+        "web_port",
+        "executor",
+        "docker_image",
+        "daytona_snapshot",
     )
     explicit_updates = any(getattr(options, name, None) is not None for name in updates)
     asking = getattr(options, "interactive", False) or (
         sys.stdin.isatty()
         and sys.stdout.isatty()
-        and ((previous is None and not options.user) or not explicit_updates)
+        and (
+            (previous is None and not options.user and not options.web_only) or not explicit_updates
+        )
     )
     if previous is None:
-        users = options.user
+        users = options.user or ([1] if options.web_only else None)
         if not users and asking:
             users = [
                 int(value.strip())
@@ -126,6 +134,11 @@ def configure_path(options, path):
         "idle_seconds": "idle_seconds",
         "retention_days": "retention_days",
         "release_url": "release_url",
+        "web_only": "web_only",
+        "web_port": "web_port",
+        "executor": "executor",
+        "docker_image": "docker_image",
+        "daytona_snapshot": "daytona_snapshot",
     }
     for field, option in fields.items():
         value = getattr(options, option, None)
@@ -135,6 +148,8 @@ def configure_path(options, path):
             setattr(
                 config, field, value.expanduser().resolve() if isinstance(value, Path) else value
             )
+    if config.web_only and config.web_port is None:
+        config.web_port = 8765
     if getattr(options, "bot_token", None):
         config.bot_token = SecretStr(options.bot_token)
     if config.model and config.model.lower() == "default":
@@ -177,7 +192,7 @@ def configure_path(options, path):
     finally:
         owner.close()
     print(f"Configured {config.name}: {path}")
-    if not config.token():
+    if not config.web_only and not config.token():
         print(f"Set {config.token_env} in the process environment before starting.")
 
 
@@ -196,7 +211,7 @@ async def doctor(config, options):
     if options.worker:
         default_provider(config)
         print("Delta and the model provider load: OK")
-    if options.online:
+    if options.online and not config.web_only:
         token = config.token()
         if not token:
             raise OperatorError("Set the configured token before checking online")
@@ -236,6 +251,8 @@ async def operator_command(options):
                 raise OperatorError("Use instances forget NAME")
             forget(options.target)
             print("Registry entry archived; config and history preserved.")
+        elif options.json:
+            print(json.dumps(sorted(registry().values(), key=lambda row: row["name"].casefold())))
         else:
             for entry in registry().values():
                 try:
@@ -272,13 +289,26 @@ async def operator_command(options):
         if not 0 < options.timeout <= 300:
             raise OperatorError("Timeout must be between zero and 300 seconds")
         config.shutdown_timeout = options.timeout
+    if options.command == "task":
+        from delta_gateway.task_cli import command
+
+        await command(config, options)
+        return
+    if options.command == "skills":
+        from delta_gateway.skills_cli import command
+
+        command(config, options)
+        return
     if options.command in {"run", "start"}:
         register(path, config)
     if options.command == "run":
-        token = config.token()
-        if not token:
-            raise OperatorError("Set the configured bot token before running")
-        await run_service(config, Telegram(token), config_path=path, launch=options.launch_id)
+        telegram = None
+        if not config.web_only:
+            token = config.token()
+            if not token:
+                raise OperatorError("Set the configured bot token before running")
+            telegram = Telegram(token)
+        await run_service(config, telegram, config_path=path, launch=options.launch_id)
     elif options.command == "start":
         state = background.start(config, path)
         print(
@@ -287,6 +317,10 @@ async def operator_command(options):
         )
         print(f'Stop: delta-gateway stop --config "{path}"')
         print(f'Logs: delta-gateway logs --config "{path}" --follow')
+    elif options.command == "status" and options.json:
+        from delta_gateway.desktop_status import inspect_instance
+
+        print(json.dumps(inspect_instance(config, path)))
     elif options.command in {"stop", "status"}:
         state = background.stop(config) if options.command == "stop" else background.status(config)
         print(

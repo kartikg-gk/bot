@@ -45,6 +45,25 @@ async def test_token_is_required(web):
     assert (await client.get("/")).status_code == 200
 
 
+async def test_proxy_ingress_requires_both_secrets_for_bearer_api(tmp_path, monkeypatch):
+    proxy = {"X-Delta-Gateway-Proxy": "x" * 43}
+    monkeypatch.setenv("DELTA_GATEWAY_PROXY_SECRET", next(iter(proxy.values())))
+    monkeypatch.setenv("DELTA_GATEWAY_WEB_TOKEN", TOKEN)
+    service = Service(config(tmp_path, web_port=0), Bot(), factory="tests.fake_session:create")
+    try:
+        await service.start_web()
+        async with httpx.AsyncClient(base_url=f"http://127.0.0.1:{service.web.port}") as client:
+            assert (await client.get("/", headers=proxy)).status_code == 200
+            assert (await client.get("/api/messages", headers=proxy)).status_code == 401
+            bearer = {"Authorization": f"Bearer {TOKEN}"}
+            assert (await client.get("/api/messages", headers=bearer)).status_code == 403
+            assert (
+                await client.get("/api/messages", headers={**bearer, **proxy})
+            ).status_code == 200
+    finally:
+        await service.close()
+
+
 async def test_message_runs_and_reply_streams_back(web):
     service, client, telegram = web
     listener = asyncio.create_task(events(client, 3))

@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from uuid import uuid4
 
+from delta_gateway import wakeups
 from delta_gateway.bots import Bot
 from delta_gateway.migrations import SCHEMA, migrate
 from delta_gateway.routing import admit_message
@@ -51,6 +52,7 @@ class Job:
     running: int
     last_status: str | None
     last_run: float | None
+    last_answer: str | None
 
     @property
     def key(self):
@@ -58,7 +60,8 @@ class Job:
 
 
 JOB_FIELDS = (
-    "id,chat,user,actor,thread,bot,task,spec,next_run,missed,status,running,last_status,last_run"
+    "id,chat,user,actor,thread,bot,task,spec,next_run,missed,status,running,last_status,last_run,"
+    "last_answer"
 )
 MAX_ACTIVE_JOBS = 50
 MISSED_GRACE = 300
@@ -95,6 +98,7 @@ class InboxItem:
     status: str
     thread: int
     user: int
+    run: str | None = None
 
     @property
     def key(self):
@@ -154,7 +158,7 @@ class Store:
             self.db.execute("INSERT OR IGNORE INTO instances(id) VALUES(?)", (instance,))
             self.db.execute(
                 "UPDATE inbox SET status='uncertain' WHERE instance=? AND status IN "
-                "('dispatching','running','delivering')",
+                "('dispatching','running','delivering','cancelling')",
                 (instance,),
             )
             self.db.execute(
@@ -163,10 +167,12 @@ class Store:
                 (time.time(), instance),
             )
             self.db.execute(
-                "UPDATE jobs SET running=0,last_status='interrupted' "
-                "WHERE instance=? AND running=1",
-                (instance,),
+                "UPDATE jobs SET running=0,last_status='interrupted',last_answer=NULL "
+                "WHERE instance=? AND running=1 AND NOT EXISTS ("
+                "SELECT 1 FROM scheduler_leases WHERE instance=? AND expires>?)",
+                (instance, instance, time.time()),
             )
+            wakeups.interrupted(self.db, instance, time.time())
             self.db.execute(
                 "UPDATE delegations SET status='interrupted',finished=? "
                 "WHERE instance=? AND status='running'",
@@ -180,6 +186,12 @@ class Store:
 
         self.seed_routes(directory / "sessions")
         self.ensure_chief()
+
+    def memory_index_path(self, state):
+        row = self.db.execute(
+            "SELECT epoch FROM memory_index_epochs WHERE instance=?", (self.instance,)
+        ).fetchone()
+        return state / "memory" / (f"qdrant-{row[0]}" if row else "qdrant")
 
     def ensure_chief(self):
         with self.db:
@@ -307,16 +319,17 @@ class Store:
                 (status, answer, time.time(), self.instance, identifier),
             )
 
-    def take_unreported(self):
+    def take_unreported(self, *, chat=None):
         with self.db:
             rows = self.db.execute(
                 f"SELECT {TASK_FIELDS} FROM tasks WHERE instance=? AND status='interrupted' "
-                "AND reported=0",
-                (self.instance,),
+                "AND reported=0 AND (? IS NULL OR chat=?)",
+                (self.instance, chat, chat),
             ).fetchall()
             self.db.execute(
-                "UPDATE tasks SET reported=1 WHERE instance=? AND status='interrupted'",
-                (self.instance,),
+                "UPDATE tasks SET reported=1 WHERE instance=? AND status='interrupted' "
+                "AND (? IS NULL OR chat=?)",
+                (self.instance, chat, chat),
             )
         return [Task(*row) for row in rows]
 
@@ -341,19 +354,40 @@ class Store:
                 ),
             )
 
-    def admit_web(self, chat, user, text, *, base):
+    def admit_web(self, chat, user, text, *, base, route=None, run=None):
         """Queue a message from the web page, with IDs Telegram updates never reach."""
         with self.db:
+            self.db.execute("BEGIN IMMEDIATE")
             newest = self.db.execute(
                 "SELECT max(id) FROM inbox WHERE instance=? AND id>=? AND id<?",
                 (self.instance, base, 2**60),
             ).fetchone()[0]
             identifier = max(newest or 0, base) + 1
+            route = route or self.conversation(chat, user)
             self.db.execute(
-                "INSERT INTO inbox VALUES(?,?,?,?,?,'pending',NULL,?,0,?)",
-                (self.instance, identifier, chat, user, text, time.time(), user),
+                "INSERT INTO inbox VALUES(?,?,?,?,?,?,?,?,?,?)",
+                (
+                    self.instance,
+                    identifier,
+                    chat,
+                    user,
+                    text,
+                    "prompt" if run else "pending",
+                    run,
+                    time.time(),
+                    route.thread,
+                    user,
+                ),
             )
-            route = self.conversation(chat, user, 0)
+            if run:
+                self.db.execute(
+                    "INSERT INTO web_runs(instance,id,inbox,bot,actor) VALUES(?,?,?,?,?)",
+                    (self.instance, run, identifier, route.bot, user),
+                )
+                self.db.execute(
+                    "INSERT INTO web_run_events VALUES(?,?,1,'run_queued',?)",
+                    (self.instance, run, json.dumps({"bot": route.bot})),
+                )
             self.db.execute(
                 "INSERT INTO messages(instance,route,direction,text,platform_id,created) "
                 "VALUES(?,?,'inbound',?,?,?)",
@@ -389,12 +423,17 @@ class Store:
             )
 
     def add_job(self, chat, user, actor, thread, bot, task, spec, first, missed="run"):
+        if missed not in {"run", "skip"}:
+            raise ValueError("Choose run or skip for missed jobs")
         with self.db:
+            self.db.execute("BEGIN IMMEDIATE")
             active = self.db.execute(
-                "SELECT count(*) FROM jobs WHERE instance=? AND status='active'", (self.instance,)
+                "SELECT count(*) FROM jobs WHERE instance=? AND actor=? "
+                "AND status IN ('active','paused')",
+                (self.instance, actor),
             ).fetchone()[0]
             if active >= MAX_ACTIVE_JOBS:
-                raise ValueError(f"At most {MAX_ACTIVE_JOBS} jobs can be active")
+                raise ValueError(f"Each person can have at most {MAX_ACTIVE_JOBS} scheduled jobs")
             return self.db.execute(
                 "INSERT INTO jobs(instance,chat,user,actor,thread,bot,task,spec,next_run,missed,"
                 "created) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
@@ -414,35 +453,99 @@ class Store:
             ).lastrowid
 
     def job(self, identifier):
+        if type(identifier) is not int or not 0 < identifier < 2**63:
+            return None
         row = self.db.execute(
             f"SELECT {JOB_FIELDS} FROM jobs WHERE instance=? AND id=?", (self.instance, identifier)
         ).fetchone()
         return Job(*row) if row else None
 
-    def jobs(self):
+    def jobs(self, *, actor=None, bot=None, history=False):
         return [
             Job(*row)
             for row in self.db.execute(
-                f"SELECT {JOB_FIELDS} FROM jobs WHERE instance=? AND status='active' ORDER BY id",
-                (self.instance,),
-            ).fetchall()
+                f"SELECT {JOB_FIELDS} FROM jobs WHERE instance=? "
+                "AND (? IS NULL OR actor=?) AND (? IS NULL OR bot=?) "
+                "AND (? OR status IN ('active','paused') OR running=1) "
+                "ORDER BY CASE WHEN status IN ('active','paused') OR running=1 "
+                "THEN 0 ELSE 1 END,id DESC LIMIT 100",
+                (self.instance, actor, actor, bot, bot, history),
+            )
         ]
 
-    def claim_due(self, now):
-        """Advance each due job before it runs, so a crash can never run it twice."""
-        claimed = []
+    def scheduler_heartbeat(self, owner, now, ttl):
         with self.db:
+            self.db.execute("BEGIN IMMEDIATE")
+            lease = self.db.execute(
+                "SELECT owner,expires FROM scheduler_leases WHERE instance=?", (self.instance,)
+            ).fetchone()
+            if lease and lease[1] > now and lease[0] != owner:
+                return False
+            if lease and lease[0] != owner and lease[1] <= now:
+                self.db.execute(
+                    "UPDATE jobs SET running=0,last_status='interrupted',last_answer=NULL "
+                    "WHERE instance=? AND running=1",
+                    (self.instance,),
+                )
+                wakeups.interrupted(self.db, self.instance, now)
+            self.db.execute(
+                "INSERT INTO scheduler_leases VALUES(?,?,?,?) ON CONFLICT(instance) DO UPDATE "
+                "SET owner=excluded.owner,heartbeat=excluded.heartbeat,expires=excluded.expires",
+                (self.instance, owner, now, now + ttl),
+            )
+            return True
+
+    def release_scheduler(self, owner):
+        with self.db:
+            self.db.execute(
+                "DELETE FROM scheduler_leases WHERE instance=? AND owner=?", (self.instance, owner)
+            )
+
+    def claim_due(self, now, *, owner=None, chat=None, busy_bots=None):
+        """Advance each due job before executing it so an interrupted slot is never replayed."""
+        claimed = []
+        occupied = set(busy_bots) if busy_bots is not None else None
+        with self.db:
+            self.db.execute("BEGIN IMMEDIATE")
+            lease = self.db.execute(
+                "SELECT owner FROM scheduler_leases WHERE instance=? AND expires>?",
+                (self.instance, now),
+            ).fetchone()
+            if (lease[0] if lease else None) != owner or not wakeups.enabled(
+                self.db, self.instance
+            ):
+                return claimed
             for row in self.db.execute(
                 f"SELECT {JOB_FIELDS} FROM jobs WHERE instance=? AND status='active' "
-                "AND running=0 AND next_run<=?",
-                (self.instance, now),
+                "AND running=0 AND (? IS NULL OR chat=?) AND (next_run<=? OR EXISTS ("
+                "SELECT 1 FROM job_wakeups WHERE instance=jobs.instance AND job=jobs.id "
+                "AND status='queued'))",
+                (self.instance, chat, chat, now),
             ).fetchall():
                 job = Job(*row)
+                if occupied is not None and job.bot in occupied:
+                    continue
+                if job.spec.startswith("event:"):
+                    self.db.execute(
+                        "UPDATE job_wakeups SET status='running',claimed=? WHERE id=("
+                        "SELECT id FROM job_wakeups WHERE instance=? AND job=? "
+                        "AND status='queued' ORDER BY id LIMIT 1)",
+                        (now, self.instance, job.id),
+                    )
+                    self.db.execute(
+                        "UPDATE jobs SET running=1,last_run=? WHERE id=?", (now, job.id)
+                    )
+                    job.running, job.last_run = 1, now
+                    claimed.append(job)
+                    if occupied is not None:
+                        occupied.add(job.bot)
+                    continue
                 upcoming = next_run(job.spec, now)
                 status = "active" if upcoming is not None else "done"
                 if job.missed == "skip" and now - job.next_run > MISSED_GRACE:
                     self.db.execute(
-                        "UPDATE jobs SET next_run=?,status=?,last_status='missed' WHERE id=?",
+                        "UPDATE jobs SET next_run=?,status=?,last_status='missed',last_answer=NULL "
+                        "WHERE id=?",
                         (upcoming, status, job.id),
                     )
                     continue
@@ -450,32 +553,67 @@ class Store:
                     "UPDATE jobs SET next_run=?,status=?,running=1,last_run=? WHERE id=?",
                     (upcoming, status, now, job.id),
                 )
-                job.next_run, job.status, job.running = upcoming, status, 1
+                job.next_run, job.status, job.running, job.last_run = upcoming, status, 1, now
                 claimed.append(job)
+                if occupied is not None:
+                    occupied.add(job.bot)
         return claimed
 
-    def finish_job(self, identifier, status):
-        with self.db:
-            self.db.execute(
-                "UPDATE jobs SET running=0,last_status=? WHERE instance=? AND id=?",
-                (status, self.instance, identifier),
-            )
-
-    def cancel_job(self, identifier):
+    def finish_job(self, identifier, status, answer=None, *, claimed_at=None):
         with self.db:
             changed = self.db.execute(
-                "UPDATE jobs SET status='cancelled',next_run=NULL "
-                "WHERE instance=? AND id=? AND status='active'",
-                (self.instance, identifier),
+                "UPDATE jobs SET running=0,last_status=?,last_answer=? WHERE instance=? AND id=? "
+                "AND (? IS NULL OR (running=1 AND last_run=?))",
+                (status, answer, self.instance, identifier, claimed_at, claimed_at),
+            ).rowcount
+            if changed:
+                self.db.execute(
+                    "UPDATE job_wakeups SET status=?,finished=? WHERE instance=? AND job=? "
+                    "AND claimed=? AND status='running'",
+                    (status, time.time(), self.instance, identifier, claimed_at),
+                )
+
+    def set_job_paused(self, identifier, actor, paused):
+        before, after = ("active", "paused") if paused else ("paused", "active")
+        with self.db:
+            changed = self.db.execute(
+                "UPDATE jobs SET status=? WHERE instance=? AND id=? AND actor=? AND status=?",
+                (after, self.instance, identifier, actor, before),
             ).rowcount
         if not changed:
-            raise ValueError("No active job with that number")
+            raise ValueError(f"No {before} job with that number")
+
+    def edit_job(self, identifier, actor, *, bot, task, spec, first, missed):
+        with self.db:
+            changed = self.db.execute(
+                "UPDATE jobs SET bot=?,task=?,spec=coalesce(?,spec),"
+                "next_run=CASE WHEN ? IS NULL THEN next_run ELSE ? END,missed=? "
+                "WHERE instance=? AND id=? AND actor=? AND status IN ('active','paused') "
+                "AND running=0",
+                (bot, task, spec, spec, first, missed, self.instance, identifier, actor),
+            ).rowcount
+        if not changed:
+            raise ValueError("Only idle active or paused jobs can be edited")
+
+    def cancel_job(self, identifier, actor=None):
+        with self.db:
+            changed = self.db.execute(
+                "UPDATE jobs SET status='cancelled',next_run=NULL WHERE instance=? AND id=? "
+                "AND (? IS NULL OR actor=?) AND (status IN ('active','paused') OR running=1)",
+                (self.instance, identifier, actor, actor),
+            ).rowcount
+        if not changed:
+            raise ValueError("No cancellable job with that number")
 
     def update_bot(self, identifier, role, instructions):
         with self.db:
             self.db.execute(
                 "UPDATE bots SET role=?,instructions=? WHERE instance=? AND id=?",
                 (role, instructions, self.instance, identifier),
+            )
+            self.db.execute(
+                "UPDATE bot_profiles SET greeting=NULL WHERE instance=? AND bot=?",
+                (self.instance, identifier),
             )
 
     def begin_delegation(self, route, bot, task):
@@ -567,6 +705,8 @@ class Store:
                         "/jobs",
                         "/schedule",
                         "/unschedule",
+                        "/pausejob",
+                        "/resumejob",
                         "/stop",
                         "/status",
                         "/help",
@@ -735,6 +875,10 @@ class Store:
             self.db.execute(
                 ("DELETE FROM approvals WHERE instance=? AND created<? AND decision IS NOT NULL"),
                 (self.instance, time.time() - 30 * 86400),
+            )
+            self.db.execute(
+                "DELETE FROM web_runs WHERE instance=? AND finished<?",
+                (self.instance, time.time() - days * 86400),
             )
             self.db.execute(
                 "DELETE FROM messages WHERE instance=? AND created<?",
@@ -921,7 +1065,7 @@ class Store:
             InboxItem(*row)
             for row in self.db.execute(
                 (
-                    "SELECT id,chat,user,text,status,thread,coalesce(route_user,user) F"
+                    "SELECT id,chat,user,text,status,thread,coalesce(route_user,user),run F"
                     "ROM inbox WHERE instance=? AND status IN ('pending','prompt','reje"
                     "cted') ORDER BY id"
                 ),

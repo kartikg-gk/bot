@@ -46,7 +46,11 @@ def test_version_four_database_upgrades(tmp_path):
     Store(tmp_path / "state", "a" * 32).close()
     db = sqlite3.connect(path)
     db.executescript(
-        "DROP TABLE memory_facts;"
+        "DROP TABLE memory_facts; DROP TABLE model_requests; DROP TABLE bot_profiles;"
+        "DROP TABLE bot_sessions; DROP TABLE bot_chat; DROP TABLE scheduler_leases;"
+        "DROP TABLE web_run_events; DROP TABLE web_runs; DROP TABLE web_bot_routes;"
+        "DROP TABLE memory_index_epochs; DROP TABLE job_automation;"
+        "DROP TABLE job_wakeups; DROP TABLE job_event_receipts; DROP TABLE model_spend;"
         "DROP TABLE tasks; DROP TABLE bot_plugins; DROP TABLE jobs; DROP TABLE delegations;"
         "DROP TABLE route_bots; DROP TABLE bots;"
         "ALTER TABLE routes DROP COLUMN bot;"

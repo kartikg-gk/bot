@@ -19,15 +19,33 @@ from delta_gateway.store import Store
 
 TABLES = (
     "instances",
+    "bots",
     "conversations",
     "routes",
     "poll_state",
+    "model_requests",
+    "model_spend",
     "inbox",
     "approvals",
     "session_owners",
     "session_status",
     "messages",
+    "bot_profiles",
+    "bot_sessions",
+    "bot_chat",
+    "bot_plugins",
+    "jobs",
+    "job_automation",
+    "job_event_receipts",
+    "job_wakeups",
+    "tasks",
+    "delegations",
+    "memory_facts",
+    "web_bot_routes",
+    "web_runs",
+    "web_run_events",
     "instance_archive",
+    "imports",
 )
 
 
@@ -44,6 +62,14 @@ def snapshot(path, config, config_path):
             for table in TABLES
             if table in tables
         }
+        if {"route_bots", "routes"} <= tables:
+            data["route_bots"] = [
+                dict(row)
+                for row in db.execute(
+                    "SELECT saved.*,routes.instance FROM route_bots AS saved "
+                    "JOIN routes ON routes.id=saved.route ORDER BY saved.route,saved.bot"
+                )
+            ]
     scopes = {row["instance"] for rows in data.values() for row in rows if "instance" in row}
     scopes.update(row["id"] for row in data.get("instances", []))
     source = config.instance
@@ -64,6 +90,88 @@ def snapshot(path, config, config_path):
             )
         ]
     return result, source
+
+
+def insert_row(db, table, row):
+    columns = ",".join(row)
+    values = ",".join("?" for _ in row)
+    return db.execute(f"INSERT INTO {table}({columns}) VALUES({values})", tuple(row.values()))
+
+
+def ensure_empty_target(db, instance):
+    for table in TABLES:
+        if (
+            table not in {"instances", "bots"}
+            and db.execute(
+                f"SELECT 1 FROM {table} WHERE instance=? LIMIT 1", (instance,)
+            ).fetchone()
+        ):
+            raise OperatorError("Destination already contains state for this instance")
+    bots = db.execute(
+        "SELECT name_key,role,instructions,chief,temporary FROM bots WHERE instance=?", (instance,)
+    ).fetchall()
+    if bots != [("chief of staff", "The user's primary bot.", "", 1, 0)]:
+        raise OperatorError("Destination already contains bot state for this instance")
+
+
+def import_product_rows(db, data, instance, route_ids):
+    for table in ("bot_profiles", "bot_sessions", "bot_plugins"):
+        for row in data.get(table, ()):
+            insert_row(db, table, {**row, "instance": instance})
+    for original in data.get("route_bots", ()):
+        row = dict(original)
+        row.pop("instance")
+        row["route"] = route_ids[row["route"]]
+        insert_row(db, "route_bots", row)
+    now = time.time()
+    job_ids = {}
+    for table in ("bot_chat", "jobs", "tasks", "delegations"):
+        for original in sorted(data.get(table, ()), key=lambda row: row["id"]):
+            row = {key: value for key, value in original.items() if key != "id"}
+            row["instance"] = instance
+            if table == "delegations":
+                row["route"] = route_ids[row["route"]]
+            if table in {"tasks", "delegations"} and row["status"] == "running":
+                row.update(status="interrupted", finished=now)
+            if table == "jobs" and row["running"]:
+                row.update(running=0, last_status="interrupted", last_answer=None)
+            identifier = insert_row(db, table, row).lastrowid
+            if table == "jobs":
+                job_ids[original["id"]] = identifier
+    for table in ("job_automation", "job_event_receipts"):
+        for row in data.get(table, ()):
+            insert_row(db, table, {**row, "instance": instance})
+    for original in sorted(data.get("job_wakeups", ()), key=lambda row: row["id"]):
+        row = {key: value for key, value in original.items() if key != "id"}
+        row.update(instance=instance, job=job_ids[row["job"]])
+        if row["status"] == "running":
+            row.update(status="interrupted", finished=now)
+        insert_row(db, "job_wakeups", row)
+    ids = {}
+    facts = data.get("memory_facts", ())
+    for original in sorted(facts, key=lambda row: row["id"]):
+        row = {key: value for key, value in original.items() if key != "id"}
+        row.update(
+            instance=instance,
+            indexed=0,
+            sync_errors=0,
+            sync_error=None,
+            replaces=None,
+            conflict=None,
+        )
+        ids[original["id"]] = insert_row(db, "memory_facts", row).lastrowid
+    for fact in facts:
+        db.execute(
+            "UPDATE memory_facts SET replaces=?,conflict=? WHERE instance=? AND id=?",
+            (
+                ids[fact["replaces"]] if fact["replaces"] is not None else None,
+                ids[fact["conflict"]] if fact["conflict"] is not None else None,
+                instance,
+                ids[fact["id"]],
+            ),
+        )
+    if facts:
+        db.execute("INSERT INTO memory_index_epochs VALUES(?,?)", (instance, uuid4().hex))
 
 
 def import_rows(store, config, data, source_key, fingerprint):
@@ -89,9 +197,14 @@ def import_rows(store, config, data, source_key, fingerprint):
             )
             for row in data.get("conversations", [])
         ]
-    id_map, key_map = {}, {}
+    id_map = {}
     with db:
         db.execute("BEGIN IMMEDIATE")
+        ensure_empty_target(db, config.instance)
+        if data.get("bots"):
+            db.execute("DELETE FROM bots WHERE instance=?", (config.instance,))
+            for bot in data["bots"]:
+                insert_row(db, "bots", {**bot, "instance": config.instance})
         for row in source_routes:
             key = row["chat"], row.get("user", 0) or 0, row.get("thread", 0) or 0
             route = store.conversation(*key)
@@ -115,7 +228,7 @@ def import_rows(store, config, data, source_key, fingerprint):
             db.execute(
                 (
                     "UPDATE routes SET session=?,session_file=?,title=?,provider=?,mode"
-                    "l=?,thinking=?,created=?,updated=? WHERE instance=? AND id=?"
+                    "l=?,thinking=?,created=?,updated=?,bot=? WHERE instance=? AND id=?"
                 ),
                 (
                     row.get("session"),
@@ -126,6 +239,7 @@ def import_rows(store, config, data, source_key, fingerprint):
                     row.get("thinking", owner.get("thinking")),
                     row.get("created", 0),
                     row.get("updated", time.time()),
+                    row.get("bot") or route.bot,
                     config.instance,
                     route.id,
                 ),
@@ -147,8 +261,26 @@ def import_rows(store, config, data, source_key, fingerprint):
             )
             if "id" in row:
                 id_map[row["id"]] = route.id
-            key_map[key] = route.id
-        for table in ("poll_state", "inbox", "approvals", "session_owners", "session_status"):
+        import_product_rows(db, data, config.instance, id_map)
+        for row in data.get("model_requests", []):
+            db.execute(
+                "INSERT INTO model_requests VALUES(?,?,?) "
+                "ON CONFLICT(instance,day) DO UPDATE SET count=model_requests.count+excluded.count",
+                (config.instance, row["day"], row["count"]),
+            )
+        for original in data.get("model_spend", []):
+            insert_row(db, "model_spend", {**original, "instance": config.instance})
+        for table in (
+            "poll_state",
+            "inbox",
+            "approvals",
+            "session_owners",
+            "session_status",
+            "web_bot_routes",
+            "web_runs",
+            "web_run_events",
+            "imports",
+        ):
             columns = [row[1] for row in db.execute(f"PRAGMA table_info({table})")]
             for original in data.get(table, []):
                 row = {key: value for key, value in original.items() if key in columns}
@@ -157,7 +289,7 @@ def import_rows(store, config, data, source_key, fingerprint):
                     row.setdefault("thread", 0)
                 if table == "inbox":
                     row.setdefault("route_user", row["user"])
-                    if row["status"] in {"dispatching", "running", "delivering"}:
+                    if row["status"] in {"dispatching", "running", "delivering", "cancelling"}:
                         row["status"] = "uncertain"
                     if row["status"] == "scheduled":
                         row["status"] = "pending"

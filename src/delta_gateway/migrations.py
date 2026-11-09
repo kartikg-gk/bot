@@ -1,6 +1,6 @@
 "Transactional topic-aware schema migration. Call only with the gateway stopped."
 
-SCHEMA = 10
+SCHEMA = 17
 
 
 def migrate(db, version):
@@ -20,6 +20,124 @@ def migrate(db, version):
         migrate_to_nine(db)
     if version < 10:
         migrate_to_ten(db)
+    if version < 11:
+        try:
+            db.executescript("""
+                BEGIN IMMEDIATE;
+                CREATE TABLE model_requests(instance TEXT NOT NULL, day TEXT NOT NULL,
+                    count INTEGER NOT NULL, PRIMARY KEY(instance, day));
+                PRAGMA user_version=11;
+                COMMIT;
+            """)
+        except BaseException:
+            db.rollback()
+            raise
+
+    if version < 12:
+        try:
+            db.executescript("""
+                BEGIN IMMEDIATE;
+                CREATE TABLE bot_profiles(instance TEXT,bot TEXT,style TEXT NOT NULL,
+                    voice TEXT NOT NULL,color TEXT NOT NULL,shape TEXT NOT NULL,greeting TEXT,
+                    PRIMARY KEY(instance,bot));
+                CREATE TABLE bot_sessions(instance TEXT,bot TEXT,session_file TEXT,
+                    PRIMARY KEY(instance,bot));
+                CREATE TABLE bot_chat(id INTEGER PRIMARY KEY,instance TEXT NOT NULL,
+                    bot TEXT NOT NULL,role TEXT NOT NULL,text TEXT NOT NULL);
+                PRAGMA user_version=12;
+                COMMIT;
+            """)
+        except BaseException:
+            db.rollback()
+            raise
+
+    if version < 13:
+        try:
+            db.executescript("""
+                BEGIN IMMEDIATE;
+                ALTER TABLE jobs ADD COLUMN last_answer TEXT;
+                CREATE INDEX jobs_actor ON jobs(instance,actor,status);
+                CREATE TABLE scheduler_leases(instance TEXT PRIMARY KEY, owner TEXT NOT NULL,
+                    heartbeat REAL NOT NULL, expires REAL NOT NULL);
+                PRAGMA user_version=13;
+                COMMIT;
+            """)
+        except BaseException:
+            db.rollback()
+            raise
+
+    if version < 14:
+        try:
+            db.executescript("""
+                BEGIN IMMEDIATE;
+                CREATE TABLE web_bot_routes(instance TEXT NOT NULL, actor INTEGER NOT NULL,
+                    bot TEXT NOT NULL, thread INTEGER NOT NULL,
+                    PRIMARY KEY(instance,actor,bot), UNIQUE(instance,actor,thread));
+                CREATE TABLE web_runs(instance TEXT NOT NULL, id TEXT NOT NULL,
+                    inbox INTEGER NOT NULL, bot TEXT NOT NULL, actor INTEGER NOT NULL,
+                    answer TEXT, finished REAL, PRIMARY KEY(instance,id), UNIQUE(instance,inbox));
+                CREATE INDEX web_runs_active ON web_runs(instance,actor,finished);
+                CREATE TABLE web_run_events(instance TEXT NOT NULL, run TEXT NOT NULL,
+                    seq INTEGER NOT NULL, kind TEXT NOT NULL, data TEXT NOT NULL,
+                    PRIMARY KEY(instance,run,seq),
+                    FOREIGN KEY(instance,run) REFERENCES web_runs(instance,id) ON DELETE CASCADE);
+                PRAGMA user_version=14;
+                COMMIT;
+            """)
+        except BaseException:
+            db.rollback()
+            raise
+
+    if version < 15:
+        try:
+            db.executescript("""
+                BEGIN IMMEDIATE;
+                CREATE TABLE memory_index_epochs(instance TEXT PRIMARY KEY, epoch TEXT NOT NULL);
+                PRAGMA user_version=15;
+                COMMIT;
+            """)
+        except BaseException:
+            db.rollback()
+            raise
+
+    if version < 16:
+        try:
+            db.executescript("""
+                BEGIN IMMEDIATE;
+                CREATE TABLE job_automation(instance TEXT PRIMARY KEY, enabled INTEGER NOT NULL);
+                CREATE TABLE job_event_receipts(instance TEXT NOT NULL, actor INTEGER NOT NULL,
+                    event TEXT NOT NULL, delivery TEXT NOT NULL, received REAL NOT NULL,
+                    PRIMARY KEY(instance,actor,event,delivery));
+                CREATE TABLE job_wakeups(id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    instance TEXT NOT NULL, actor INTEGER NOT NULL, job INTEGER NOT NULL,
+                    event TEXT NOT NULL,
+                    delivery TEXT NOT NULL, received REAL NOT NULL, claimed REAL, finished REAL,
+                    status TEXT NOT NULL DEFAULT 'queued');
+                CREATE INDEX job_wakeup_queue ON job_wakeups(instance,job,status,id);
+                CREATE TRIGGER cancel_queued_wakeups AFTER UPDATE OF status,spec ON jobs
+                WHEN NEW.status='cancelled' OR NEW.spec<>OLD.spec BEGIN
+                    UPDATE job_wakeups SET status='cancelled',finished=unixepoch()
+                    WHERE instance=NEW.instance AND job=NEW.id AND status='queued';
+                END;
+                PRAGMA user_version=16;
+                COMMIT;
+            """)
+        except BaseException:
+            db.rollback()
+            raise
+
+    if version < 17:
+        try:
+            db.executescript("""
+                BEGIN IMMEDIATE;
+                CREATE TABLE model_spend(instance TEXT NOT NULL, day TEXT NOT NULL,
+                    micros INTEGER NOT NULL, PRIMARY KEY(instance,day));
+                PRAGMA user_version=17;
+                COMMIT;
+            """)
+        except BaseException:
+            db.rollback()
+            raise
 
 
 def migrate_to_ten(db):

@@ -5,6 +5,7 @@ The agent loop runs in the gateway with the model key; only tool work reaches a 
 
 import asyncio
 import contextlib
+import json
 import os
 import shlex
 from pathlib import Path
@@ -14,6 +15,59 @@ CONTAINER_ROOT = "/workspace"
 
 class ComputerError(RuntimeError):
     pass
+
+
+class ManagedComputer:
+    """Acquire a persistent computer only when a file or command tool needs it."""
+
+    def __init__(self, computer):
+        self.computer = computer
+        self.started = False
+        self.cleanup_needed = False
+        self.lock = asyncio.Lock()
+
+    def __getattr__(self, name):
+        return getattr(self.computer, name)
+
+    async def start(self):
+        async with self.lock:
+            if not self.started:
+                if self.cleanup_needed:
+                    await self.computer.stop()
+                    self.cleanup_needed = False
+                self.cleanup_needed = True
+                try:
+                    await self.computer.start()
+                except BaseException:
+                    with contextlib.suppress(Exception):
+                        await self.computer.stop()
+                        self.cleanup_needed = False
+                    raise
+                self.started = True
+
+    async def read(self, path):
+        await self.start()
+        return await self.computer.read(path)
+
+    async def write(self, path, data):
+        await self.start()
+        return await self.computer.write(path, data)
+
+    async def run(self, command, timeout):
+        await self.start()
+        return await self.computer.run(command, timeout)
+
+    async def stop(self):
+        async with self.lock:
+            if self.cleanup_needed:
+                await self.computer.stop()
+                self.started = self.cleanup_needed = False
+
+    async def remove(self):
+        async with self.lock:
+            if hasattr(self.computer, "remove"):
+                await self.computer.remove()
+            self.started = self.cleanup_needed = False
 
 
 class LocalComputer:
@@ -87,9 +141,10 @@ class DockerComputer:
     async def start(self):
         Path(self.host_root).mkdir(parents=True, exist_ok=True)
         code, output, _ = await self.docker("inspect", "--format", "{{.State.Running}}", self.name)
-        if code == 0 and output.strip() == b"true":
-            return
         if code == 0:
+            await self.verify_read_only_mounts()
+            if output.strip() == b"true":
+                return
             code, _, error = await self.docker("start", self.name)
         else:
             code, _, error = await self.docker(
@@ -119,6 +174,25 @@ class DockerComputer:
             )
         if code:
             raise ComputerError("Could not start the bot's container; check Docker and the image")
+
+    async def verify_read_only_mounts(self):
+        expected = {
+            target.removesuffix(":ro") for _, target in self.mounts if target.endswith(":ro")
+        }
+        if not expected:
+            return
+        code, output, _ = await self.docker("inspect", "--format", "{{json .Mounts}}", self.name)
+        if code:
+            raise ComputerError("Could not verify the container's read-only mounts")
+        try:
+            mounts = json.loads(output)
+            read_only = {entry["Destination"] for entry in mounts if entry.get("RW") is False}
+        except (ValueError, AttributeError, TypeError, KeyError):
+            raise ComputerError("Could not verify the container's read-only mounts") from None
+        if not expected <= read_only:
+            raise ComputerError(
+                f"Container {self.name} needs to be recreated with read-only bot note mounts"
+            )
 
     async def run(self, command, timeout):
         # The deadline is enforced inside the container too, so a killed exec leaves nothing
@@ -174,18 +248,24 @@ class DockerComputer:
         return output.strip() == b"existed"
 
     async def stop(self):
-        await self.docker("stop", "-t", "5", self.name)
+        code, _, error = await self.docker("stop", "-t", "5", self.name)
+        if code and b"No such container" not in error:
+            raise ComputerError("Could not stop the bot's container; check Docker")
 
     async def remove(self):
-        await self.docker("rm", "-f", self.name)
+        code, _, error = await self.docker("rm", "-f", self.name)
+        if code and b"No such container" not in error:
+            raise ComputerError("Could not remove the bot's container; check Docker")
 
 
 async def finish(process, timeout):
     try:
         output, _ = await asyncio.wait_for(process.communicate(), timeout)
-    except TimeoutError:
+    except (TimeoutError, asyncio.CancelledError) as error:
         with contextlib.suppress(ProcessLookupError):
             process.kill()
         await process.wait()
+        if isinstance(error, asyncio.CancelledError):
+            raise
         return None, b""
     return process.returncode, output

@@ -4,8 +4,9 @@ import json
 
 import httpx
 
-from delta_gateway.plugins import PLUGINS, TOOL_OWNERS, PluginRunner
+from delta_gateway.plugins import TOOL_OWNERS, PluginRunner
 from delta_gateway.schedule import parse_when
+from delta_gateway.tracing import observation
 
 MAX_ANSWER = 20000
 MAX_AGENTS = 4
@@ -112,12 +113,16 @@ CHIEF_TOOLS = [
         },
         approval=False,
     ),
+]
+
+JOB_TOOLS = [
     dict(
         name="schedule_job",
         description=(
             "Schedule a self-contained task, only when the user asks. when is `every 30m`, "
             "`daily 08:00` in the host's time zone, or `at 2026-11-02T08:00+05:30`. The result is "
-            "sent to this chat. Omit bot_name to run it yourself."
+            "sent to this chat. Omit bot_name to run it yourself. Only the chief can assign "
+            "a different bot."
         ),
         parameters={
             "type": "object",
@@ -158,6 +163,7 @@ class Team:
         self.store, self.sessions = store, sessions
         self.plugins = plugins or PluginRunner()
         self.spawner = self.canceller = None
+        self.job_canceller = store.cancel_job
 
     def teammate(self, name):
         bot = self.store.find_bot(name)
@@ -177,7 +183,7 @@ class Team:
         plugin = TOOL_OWNERS[name]
         if not bot or plugin not in self.store.plugins_for(bot.id):
             raise ValueError(f"{plugin} is not enabled for this bot.")
-        if not PLUGINS[plugin].configured():
+        if not self.plugins.configured(plugin):
             raise ValueError(f"{plugin} is not set up on the gateway.")
         try:
             return await self.plugins.run(name, arguments)
@@ -191,6 +197,56 @@ class Team:
     async def run(self, name, arguments, route, event=None, actor=None, bot=None):
         if name in TOOL_OWNERS:
             return await self.call_plugin(name, arguments, bot)
+        from delta_gateway.skill_tools import NAMES, run
+
+        if name in NAMES:
+            return await run(self.sessions, bot, name, arguments)
+        if name == "update_own_bot":
+            if not bot:
+                raise ValueError("A named bot is required")
+            current = self.store.bot(bot.id)
+            if current is None:
+                raise ValueError("This bot has been deleted")
+            description = arguments.get("description", current.role)
+            instructions = arguments.get("instructions", current.instructions)
+            if not isinstance(description, str) or not description.strip():
+                raise ValueError("A bot needs a purpose")
+            if not isinstance(instructions, str):
+                raise ValueError("Instructions must be text")
+            self.store.update_bot(bot.id, description, instructions)
+            return "Saved. The new instructions apply on the next run."
+        owner = actor or route.user
+        if name == "schedule_job":
+            current = bot or self.store.bots()[0]
+            requested = arguments.get("bot_name")
+            if requested and not current.chief and requested.casefold() != current.name.casefold():
+                raise ValueError("A specialist can only schedule itself")
+            target = self.store.find_bot(requested) if requested else current
+            if target is None or target.temporary:
+                raise ValueError("Choose a persistent bot")
+            identifier = self.schedule(arguments["when"], arguments["task"], target, route, owner)
+            return f"Scheduled job {identifier}."
+        if name == "list_scheduled_jobs":
+            return json.dumps(
+                [
+                    dict(
+                        id=j.id,
+                        bot=getattr(self.store.bot(j.bot), "name", "Deleted bot"),
+                        task=j.task,
+                        schedule=j.spec,
+                        status=j.status,
+                    )
+                    for j in self.store.jobs(
+                        actor=owner, bot=bot.id if bot and not bot.chief else None
+                    )
+                ]
+            )
+        if name == "cancel_scheduled_job":
+            job = self.store.job(arguments["job_id"])
+            if not job or job.actor != owner or (bot and not bot.chief and job.bot != bot.id):
+                raise ValueError("No cancellable job with that number")
+            self.job_canceller(job.id, owner)
+            return "Cancelled."
         if bot and not bot.chief:
             raise ValueError("Only the chief of staff can use this tool.")
         if name in {"spawn_agent", "spawn_writer_agent"}:
@@ -215,25 +271,6 @@ class Team:
         if name == "cancel_task":
             self.canceller(arguments["task_id"])
             return "Cancelling."
-        if name == "schedule_job":
-            requested = arguments.get("bot_name")
-            bot = self.store.find_bot(requested) if requested else self.store.bots()[0]
-            if not bot:
-                raise ValueError(f"No bot named {requested}. Use list_bots.")
-            identifier = self.schedule(
-                arguments["when"], arguments["task"], bot, route, actor or route.user
-            )
-            return f"Scheduled job {identifier}."
-        if name == "list_scheduled_jobs":
-            return json.dumps(
-                [
-                    dict(id=j.id, bot=self.store.bot(j.bot).name, task=j.task, schedule=j.spec)
-                    for j in self.store.jobs()
-                ]
-            )
-        if name == "cancel_scheduled_job":
-            self.store.cancel_job(arguments["job_id"])
-            return "Cancelled."
         if name == "list_bots":
             return json.dumps(
                 [
@@ -263,9 +300,10 @@ class Team:
         record = self.store.begin_delegation(route.id, bot, task)
         answer, status = "", "interrupted"
         try:
-            answer, status = await self.sessions.delegate(
-                bot, task, (lambda client, item: event(bot, client, item)) if event else None
-            )
+            with observation("delegation", "agent"):
+                answer, status = await self.sessions.delegate(
+                    bot, task, (lambda client, item: event(bot, client, item)) if event else None
+                )
         finally:
             self.store.finish_delegation(record, status, answer)
         if len(answer) > MAX_ANSWER:

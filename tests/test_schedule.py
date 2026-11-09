@@ -117,24 +117,17 @@ async def test_commands_list_and_cancel(tmp_path):
         await service.close()
 
 
-async def test_job_approval_survives_a_chat_prompt_finishing(tmp_path):
+async def test_unattended_job_refuses_a_write_without_opening_approval(tmp_path):
     c = config(tmp_path, policy="ask")
     service = Service(c, Bot(), factory="tests.fake_session:create")
     try:
         worker = service.store.create_bot("Researcher", "Finds things")
         service.store.add_job(11, 11, 11, 0, worker.id, "write", "once", 0, "run")
         service.run_due()
-        async with asyncio.timeout(30):
-            while not service.cards:
-                await asyncio.sleep(0.02)
-        await command(service, c, 1, "hello")
-        assert service.cards
-        card = next(iter(service.cards.values()))
-        await card["client"].request(
-            "respond_to_approval", approvalId=card["event"]["approval_id"], allow=True
-        )
-        await wait_jobs(service)
-        assert (c.state / "bots" / worker.id / "workspace" / "approved.txt").exists()
+        async with asyncio.timeout(10):
+            await wait_jobs(service)
+        assert not service.cards
+        assert not (c.state / "bots" / worker.id / "workspace" / "approved.txt").exists()
     finally:
         await service.close()
 

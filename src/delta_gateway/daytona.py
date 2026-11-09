@@ -1,7 +1,7 @@
 """A bot's computer as a persistent Daytona sandbox with all network blocked.
 
-The sandbox keeps its files between runs and stops itself when idle. It cannot see the
-gateway's disk, so the bot's memory files are copied up when it starts and back when it stops.
+The sandbox keeps its files between runs and stops itself when idle. It receives a copy
+of the bot's notes at startup. Reviewed note changes are saved by the gateway.
 """
 
 import asyncio
@@ -54,17 +54,36 @@ class DaytonaComputer:
                         snapshot=self.config.daytona_snapshot,
                         network_block_all=True,
                         auto_stop_interval=IDLE_MINUTES,
+                        auto_archive_interval=self.config.daytona_archive_minutes,
                         labels={"delta-gateway": self.config.instance},
                     )
                 )
-            await self.exec(f"mkdir -p {self.root} {self.memory_path}", 60)
+            await self.sandbox.set_auto_archive_interval(self.config.daytona_archive_minutes)
+            response = await asyncio.wait_for(
+                self.sandbox.process.exec(
+                    f"mkdir -p {shlex.quote(self.root)} {shlex.quote(self.memory_path)}",
+                    timeout=60,
+                ),
+                70,
+            )
+            if response.exit_code != 0:
+                raise ComputerError("Could not prepare the bot workspace")
             if self.memory and self.memory.is_dir():
                 for path in self.memory.glob("*.md"):
                     await self.sandbox.fs.upload_file(
                         path.read_bytes(), f"{self.memory_path}/{path.name}"
                     )
 
+    async def ready(self):
+        if self.sandbox is None:
+            await self.start()
+            return
+        await self.sandbox.refresh_data()
+        if str(self.sandbox.state).lower().split(".")[-1] != "started":
+            await self.sandbox.start()
+
     async def exec(self, command, timeout):
+        await self.ready()
         try:
             response = await asyncio.wait_for(
                 self.sandbox.process.exec(command, cwd=self.root, timeout=int(timeout)),
@@ -99,19 +118,29 @@ class DaytonaComputer:
         await self.sandbox.fs.upload_file(data, path)
         return output.strip() == b"existed"
 
+    async def remove(self):
+        sdk = self.sdk or load_sdk()
+        if not os.environ.get("DAYTONA_API_KEY"):
+            raise ComputerError("Set DAYTONA_API_KEY to remove this sandbox")
+        client = self.client or sdk.AsyncDaytona(
+            sdk.DaytonaConfig(target=self.config.daytona_target)
+        )
+        try:
+            try:
+                sandbox = await client.get(self.name)
+            except sdk.DaytonaNotFoundError:
+                return
+            await client.delete(sandbox)
+        finally:
+            await client.close()
+            self.client = self.sandbox = None
+
     async def stop(self):
         if not self.sandbox:
             return
-        # Bring memory edits home before the sandbox sleeps.
-        if self.memory and self.memory.is_dir():
-            for path in self.memory.glob("*.md"):
-                try:
-                    data = await self.sandbox.fs.download_file(f"{self.memory_path}/{path.name}")
-                except Exception:  # noqa: BLE001 - a missing copy keeps the local file
-                    continue
-                if data:
-                    path.write_bytes(data)
+        await self.ready()
         await self.sandbox.stop()
         if self.client:
             await self.client.close()
             self.client = None
+        self.sandbox = None

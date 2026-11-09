@@ -41,8 +41,8 @@ class ProcessRecord:
         )
         atomic_json(directory(config) / "process.json", self.data)
 
-    def ready(self):
-        self.data["state"] = "ready"
+    def ready(self, web_port=None):
+        self.data.update(state="ready", web_port=web_port)
         atomic_json(directory(self.config) / "process.json", self.data)
         print("Gateway ready: " + (self.config.name or self.config.instance), flush=True)
 
@@ -79,6 +79,7 @@ def status(config):
         running=active,
         state=state,
         pid=record.get("pid") if active else None,
+        web_port=record.get("web_port") if active and state == "ready" else None,
     )
 
 
@@ -87,7 +88,7 @@ def start(config, path):
     try:
         if status(config)["running"]:
             raise OperatorError("Instance is already running")
-        if not config.token():
+        if not config.web_only and not config.token():
             raise OperatorError("Set the configured token environment variable before starting")
         root = directory(config)
         root.mkdir(parents=True, exist_ok=True)

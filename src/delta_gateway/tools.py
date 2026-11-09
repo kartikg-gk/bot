@@ -7,7 +7,7 @@ approval rules see the same tools; only where the work happens differs.
 import asyncio
 import posixpath
 from dataclasses import replace
-from pathlib import PurePosixPath, PureWindowsPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 from delta_app.tools._shared import (
     BINARY_EXTENSIONS,
@@ -30,8 +30,10 @@ def absolute(computer, raw):
         raise ValueError("File path must not be empty.")
     posix = getattr(computer, "posix", False)
     if not (PurePosixPath(raw).is_absolute() or (not posix and PureWindowsPath(raw).is_absolute())):
-        raise ValueError(f"File path must be absolute, got relative path: {raw}")
-    return posixpath.normpath(raw) if posix else raw
+        if PureWindowsPath(raw).drive:
+            raise ValueError("Drive-relative file paths are not supported")
+        raw = posixpath.join(computer.root, raw) if posix else str(Path(computer.root) / raw)
+    return posixpath.normpath(raw) if posix else str(Path(raw).resolve())
 
 
 def computer_tools(computer):

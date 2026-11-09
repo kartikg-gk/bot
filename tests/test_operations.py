@@ -8,6 +8,7 @@ from delta_gateway.background import ProcessRecord, metadata, status
 from delta_gateway.cli import parser
 from delta_gateway.config import load, save
 from delta_gateway.instances import OperatorError, forget, lease, register, registry, resolve
+from delta_gateway.migrations import SCHEMA
 from delta_gateway.operators import configure
 from delta_gateway.routing import admit_message
 from delta_gateway.service import run_service
@@ -80,7 +81,7 @@ def test_upgrade_preserves_routes_receipts_and_backup(tmp_path, version):
         assert store.owns(11, 11, 0, "old")
         assert store.offset == 42
         assert store.pending()[0][4:] == ("pending", 0)
-        backup = next(c.state.glob("gateway.before-v10-*.sqlite3"))
+        backup = next(c.state.glob(f"gateway.before-v{SCHEMA}-*.sqlite3"))
         with sqlite3.connect(backup) as db:
             assert db.execute("PRAGMA user_version").fetchone()[0] == version
     finally:

@@ -30,6 +30,7 @@ class Process:
 
     async def exec(self, command, cwd=None, timeout=None):
         self.sandbox.commands.append(command)
+        self.sandbox.locations.append(cwd)
         files = self.sandbox.files
         test = re.match(r"\[ -e (\S+) \] \|\| exit 3", command)
         if test:
@@ -45,7 +46,14 @@ class Process:
 class Sandbox:
     def __init__(self, params):
         self.params, self.state, self.files, self.commands = params, "started", {}, []
+        self.locations = []
         self.fs, self.process = Files(self.files), Process(self)
+
+    async def refresh_data(self):
+        pass
+
+    async def set_auto_archive_interval(self, interval):
+        self.params.auto_archive_interval = interval
 
     async def start(self):
         self.state = "started"
@@ -68,6 +76,9 @@ class Client:
     async def create(self, params):
         self.sandboxes[params.name] = Sandbox(params)
         return self.sandboxes[params.name]
+
+    async def delete(self, sandbox):
+        del self.sandboxes[sandbox.params.name]
 
     async def close(self):
         pass
@@ -98,14 +109,17 @@ async def test_sandbox_is_created_locked_down_then_reused(tmp_path, memory, monk
     await computer.start()
     sandbox = Client.sandboxes["delta-bot-x"]
     assert sandbox.params.network_block_all is True and sandbox.params.auto_stop_interval == 15
+    assert sandbox.locations[0] is None
+    sandbox.files["/home/daytona/workspace/project.txt"] = b"kept"
     assert sandbox.files["/home/daytona/memory/KNOWLEDGE.md"] == b"known"
     sandbox.files["/home/daytona/memory/KNOWLEDGE.md"] = b"learned"
     await computer.stop()
     assert sandbox.state == "stopped"
-    assert (memory / "KNOWLEDGE.md").read_text() == "learned"
+    assert (memory / "KNOWLEDGE.md").read_text() == "known"
     again = DaytonaComputer("delta-bot-x", config(tmp_path), memory, sdk=fake)
     await again.start()
     assert Client.sandboxes["delta-bot-x"] is sandbox and sandbox.state == "started"
+    assert sandbox.files["/home/daytona/workspace/project.txt"] == b"kept"
 
 
 async def test_tools_use_the_sandbox(tmp_path, memory, monkeypatch):
@@ -126,3 +140,46 @@ async def test_missing_key_is_reported(tmp_path, monkeypatch):
     computer = DaytonaComputer("delta-bot-z", config(tmp_path), sdk=sdk())
     with pytest.raises(RuntimeError, match="DAYTONA_API_KEY"):
         await computer.start()
+
+
+async def test_removal_deletes_remote_sandbox_and_is_idempotent(tmp_path, monkeypatch):
+    monkeypatch.setenv("DAYTONA_API_KEY", "test-key")
+    computer = DaytonaComputer("delta-bot-delete", config(tmp_path), sdk=sdk())
+    await computer.start()
+    assert "delta-bot-delete" in Client.sandboxes
+    await computer.remove()
+    assert "delta-bot-delete" not in Client.sandboxes
+    assert computer.client is None and computer.sandbox is None
+    await computer.remove()
+
+
+async def test_stopped_sandbox_reopens_without_replaying_command_or_overwriting_notes(
+    tmp_path, memory, monkeypatch
+):
+    monkeypatch.setenv("DAYTONA_API_KEY", "test-key")
+    computer = DaytonaComputer("delta-bot-recover", config(tmp_path), memory, sdk=sdk())
+    await computer.start()
+    sandbox = Client.sandboxes[computer.name]
+    assert sandbox.params.auto_archive_interval == 60
+    sandbox.files[computer.memory_path + "/KNOWLEDGE.md"] = b"new remote notes"
+    sandbox.state = "stopped"
+    result = await computer.run("echo once", 5)
+    assert result[0] == 0 and sandbox.state == "started"
+    assert sandbox.commands.count("echo once") == 1
+    assert sandbox.files[computer.memory_path + "/KNOWLEDGE.md"] == b"new remote notes"
+    await computer.stop()
+    assert (memory / "KNOWLEDGE.md").read_text() == "known"
+    computer.config.daytona_archive_minutes = 10
+    await computer.start()
+    assert sandbox.params.auto_archive_interval == 10
+    assert sandbox.files[computer.memory_path + "/KNOWLEDGE.md"] == b"known"
+    await computer.stop()
+
+
+async def test_remote_empty_note_cannot_replace_host_notes(tmp_path, memory, monkeypatch):
+    monkeypatch.setenv("DAYTONA_API_KEY", "test-key")
+    computer = DaytonaComputer("delta-bot-empty-note", config(tmp_path), memory, sdk=sdk())
+    await computer.start()
+    computer.sandbox.files[computer.memory_path + "/KNOWLEDGE.md"] = b""
+    await computer.stop()
+    assert (memory / "KNOWLEDGE.md").read_bytes() == b"known"

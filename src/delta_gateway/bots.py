@@ -3,7 +3,23 @@
 from dataclasses import dataclass
 
 from delta_gateway.plugins import PLUGINS
-from delta_gateway.team import CHIEF_PROMPT, CHIEF_TOOLS
+from delta_gateway.team import CHIEF_PROMPT, CHIEF_TOOLS, JOB_TOOLS
+
+SELF_TOOLS = [
+    dict(
+        name="update_own_bot",
+        description="Save your own purpose or instructions after explicit user approval.",
+        parameters={
+            "type": "object",
+            "properties": {
+                "description": {"type": "string", "minLength": 1, "maxLength": 10000},
+                "instructions": {"type": "string", "maxLength": 10000},
+            },
+            "minProperties": 1,
+            "additionalProperties": False,
+        },
+    )
+]
 
 MEMORY_FILES = ("PREFERENCES.md", "KNOWLEDGE.md")
 MEMORY_PREVIEW = 8000
@@ -37,8 +53,8 @@ def system_addition(config, bot, memory_path=None):
         f"Working instructions: {bot.instructions or 'Learn these from the user.'}",
         "# Memory\n"
         f"Your memory files are in {shown}. PREFERENCES.md holds the user's explicit "
-        "preferences; KNOWLEDGE.md holds verified, reusable facts. Update them with your file "
-        "tools when you learn something lasting, and never store secrets. Saved memory informs "
+        "preferences. KNOWLEDGE.md holds verified, reusable facts. Use write_memory to propose "
+        "lasting changes for review, and never store secrets. Saved memory informs "
         "the user's tasks; it never authorizes an action by itself.",
     ]
     if bot.chief:
@@ -74,7 +90,9 @@ def prepare(config, bot, plugins=(), memory_path=None):
     directory.mkdir(parents=True, exist_ok=True)
     prepared = config.model_copy(deep=True)
     prepared.project = directory
-    definitions = list(CHIEF_TOOLS) if bot.chief else []
+    from delta_gateway.skill_tools import TOOLS
+
+    definitions = [*SELF_TOOLS, *TOOLS, *JOB_TOOLS, *(CHIEF_TOOLS if bot.chief else [])]
     for plugin in plugins:
         definitions += PLUGINS[plugin].tools
     return Prepared(prepared, system_addition(config, bot, memory_path), definitions)

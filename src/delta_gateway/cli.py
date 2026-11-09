@@ -37,7 +37,12 @@ def parser():
             sub.add_argument("--interactive", action="store_true")
             sub.add_argument("--project", type=Path)
             sub.add_argument("--user", "--allowed-user-id", type=int, action="append")
+            sub.add_argument("--web-only", action=argparse.BooleanOptionalAction, default=None)
+            sub.add_argument("--web-port", type=int)
             sub.add_argument("--state-dir", type=Path)
+            sub.add_argument("--executor", choices=["local", "docker", "daytona"])
+            sub.add_argument("--docker-image")
+            sub.add_argument("--daytona-snapshot")
             sub.add_argument("--name")
             sub.add_argument("--token-env")
             sub.add_argument("--provider")
@@ -74,6 +79,8 @@ def parser():
         if name == "doctor":
             sub.add_argument("--online", action="store_true")
             sub.add_argument("--worker", action="store_true")
+        if name == "status":
+            sub.add_argument("--json", action="store_true")
         if name == "state":
             sub.add_argument("--dismiss", type=int)
         if name == "logs":
@@ -90,9 +97,26 @@ def parser():
             sub.add_argument("--dry-run", action="store_true")
             sub.add_argument("--all", action="store_true")
             sub.add_argument("--database", type=Path)
+    skills = commands.add_parser("skills", help="Manage shared or bot-local skill folders")
+    skills.add_argument("-c", "--config", type=Path, default=argparse.SUPPRESS)
+    skills.add_argument("-i", "--instance", default=argparse.SUPPRESS)
+    skills.add_argument("action", nargs="?", choices=["list", "add", "remove"], default="list")
+    skills.add_argument(
+        "target", nargs="?", help="Local skill folder for add; skill name for remove"
+    )
+    skills.add_argument("--bot", help="Bot name or ID; omit to manage shared instance skills")
+    task = commands.add_parser("task", help="Run one task with a gateway bot")
+    task.add_argument("-c", "--config", type=Path, default=argparse.SUPPRESS)
+    task.add_argument("-i", "--instance", default=argparse.SUPPRESS)
+    task.add_argument("text", help="Task text, or '-' to read stdin")
+    task.add_argument("--bot", help="Persistent bot name or ID; defaults to the chief")
+    task.add_argument("--account", help="Account email for Google sign-in mode")
+    task.add_argument("--deadline", type=float, default=120)
+    task.add_argument("--json", action="store_true")
     instances = commands.add_parser("instances")
     instances.add_argument("action", nargs="?", choices=["list", "forget"], default="list")
     instances.add_argument("target", nargs="?")
+    instances.add_argument("--json", action="store_true")
     return result
 
 
