@@ -1,0 +1,21 @@
+* { box-sizing: border-box; }
+:root { color-scheme: light dark; font: 15px system-ui, sans-serif; }
+body { margin: 0; background: Canvas; color: CanvasText; }
+main { padding: 28px; max-width: 1000px; margin: auto; }
+header { margin-bottom: 24px; }
+.eyebrow { font-size: 12px; letter-spacing: .13em; opacity: .75; }
+h1 { margin: 0; font-size: 2rem; }
+h2 { margin: 0 0 12px; font-size: 1.15rem; }
+p { margin: 8px 0; overflow-wrap: anywhere; }
+section { border: 1px solid color-mix(in srgb, CanvasText 25%, Canvas); border-radius: 12px;
+  padding: 16px; margin: 14px 0; }
+.row { display: flex; flex-wrap: wrap; align-items: end; gap: 10px; }
+label { display: grid; gap: 5px; max-width: 100%; }
+input, select, button { font: inherit; min-height: 34px; padding: 5px 10px; }
+select { max-width: min(70vw, 450px); }
+button:not(:disabled) { cursor: pointer; }
+button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px solid Highlight; }
+pre { max-height: 240px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
+#notice, #error { position: sticky; bottom: 0; background: Canvas; padding: 6px; }
+#error:not(:empty) { border-left: 3px solid currentColor; }
+#notice:empty, #error:empty { padding: 0; }

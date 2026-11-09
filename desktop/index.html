@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'self'; script-src 'self'; base-uri 'none'; form-action 'none'">
+  <title>Delta Gateway</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="renderer.js" defer></script>
+</head>
+<body>
+<main>
+  <header>
+    <p class="eyebrow">LOCAL OPERATOR CONSOLE</p>
+    <h1>Delta Gateway</h1>
+    <p>Manage your gateway and its scheduler from one window.</p>
+  </header>
+
+  <section aria-labelledby="instances-title">
+    <h2 id="instances-title">Instance</h2>
+    <div class="row">
+      <label>Configuration <select id="instances"></select></label>
+      <button id="import" type="button">Open configuration…</button>
+      <button id="refresh" type="button">Refresh</button>
+    </div>
+    <p id="status" role="status">Select a gateway configuration.</p>
+    <div class="row">
+      <button id="start" type="button" disabled>Start</button>
+      <button id="stop" type="button" disabled>Stop</button>
+      <button id="dashboard" type="button" disabled>Open dashboard</button>
+      <button id="copy-token" type="button" disabled>Copy web token</button>
+    </div>
+  </section>
+
+  <section aria-labelledby="setup-title">
+    <h2 id="setup-title">Set up a local gateway</h2>
+    <form id="setup">
+      <div class="row">
+        <button id="choose-project" type="button">Choose project folder…</button>
+        <span id="project">No folder selected</span>
+      </div>
+      <div class="row">
+        <label>Instance name <input id="name" required maxlength="64" pattern="[A-Za-z0-9][A-Za-z0-9\-]{0,63}"></label>
+        <label>Executor <select id="executor" required>
+          <option value="">Choose…</option><option value="local">Local (host access)</option>
+          <option value="docker">Docker</option><option value="daytona">Daytona</option>
+        </select></label>
+        <label>Image or snapshot <input id="image" maxlength="200" disabled></label>
+      </div>
+      <div class="row">
+        <label>Provider <select id="provider">
+          <option value="">Delta default</option><option value="openai">OpenAI</option>
+          <option value="anthropic">Anthropic</option><option value="openrouter">OpenRouter</option>
+        </select></label>
+        <label>Model ID (optional) <input id="model" maxlength="200"></label>
+        <button id="create" type="submit" disabled>Create gateway</button>
+      </div>
+    </form>
+    <p>New instances use a private loopback dashboard. Choose a saved model or add a provider key before prompting.</p>
+  </section>
+
+  <section aria-labelledby="credentials-title">
+    <h2 id="credentials-title">Credentials</h2>
+    <form id="credential-form" class="row">
+      <label>Environment variable <select id="credential-name"></select></label>
+      <label>Value <input id="credential" type="password" maxlength="4096" autocomplete="off"></label>
+      <button id="save-credential" type="submit" disabled>Save</button>
+    </form>
+    <p id="saved"></p>
+    <p>Saved values are unlocked through the operating system. A blank value removes the saved entry.</p>
+  </section>
+
+  <section aria-labelledby="logs-title">
+    <h2 id="logs-title">Gateway logs</h2>
+    <button id="logs" type="button" disabled>Load recent logs</button>
+    <pre id="log-output" tabindex="0"></pre>
+  </section>
+
+  <footer class="row">
+    <button id="binary" type="button">Choose CLI…</button>
+    <span id="binary-path"></span>
+  </footer>
+  <p id="notice" role="status"></p>
+  <p id="error" role="alert"></p>
+</main>
+</body>
+</html>
