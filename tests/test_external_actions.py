@@ -66,8 +66,9 @@ async def test_tinyfish_search_fetch_and_browser_run_contract():
         assert searched["results"][0]["title"] == "Page"
         fetched = data(await runner.run("tinyfish_fetch", {"url": "https://example.test/"}))
         assert fetched["nextOffset"] == 2200
-        with pytest.raises(ValueError, match="public"):
-            await runner.run("tinyfish_fetch", {"url": "http://127.0.0.1/admin"})
+        for target in ("http://127.0.0.1/admin", "http://127.1/admin", "http://0x7f.0.0.1/admin"):
+            with pytest.raises(ValueError, match="public"):
+                await runner.run("tinyfish_fetch", {"url": target})
         args = {
             "url": "https://example.test/",
             "goal": "Find the page heading",

@@ -95,11 +95,16 @@ def public_url(value):
             or (url.port is not None and not 1 <= url.port <= 65535)
         ):
             raise ValueError
-        host = hostname.rstrip(".").lower()
+        host = hostname.encode("idna").decode("ascii").rstrip(".").lower()
         try:
             address = ipaddress.ip_address(host)
         except ValueError:
-            if "." not in host or host.endswith((".localhost", ".local", ".internal")):
+            numeric_suffix = re.fullmatch(r"(?:[0-9]+|0x[0-9a-f]+)", host.rsplit(".", 1)[-1])
+            if (
+                "." not in host
+                or numeric_suffix
+                or host.endswith((".localhost", ".local", ".internal"))
+            ):
                 raise ValueError from None
         else:
             if not address.is_global or address.is_multicast:
