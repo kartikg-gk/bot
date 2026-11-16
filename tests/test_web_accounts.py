@@ -23,7 +23,7 @@ CLIENT = "gateway-client.apps.googleusercontent.com"
 
 
 @pytest.fixture
-async def accounts(tmp_path, monkeypatch):
+async def accounts(tmp_path, monkeypatch, request):
     monkeypatch.setenv("DELTA_GATEWAY_GOOGLE_CLIENT_ID", CLIENT)
     monkeypatch.setenv("DELTA_GATEWAY_GOOGLE_CLIENT_SECRET", "test-secret")
     monkeypatch.setenv("DELTA_GATEWAY_MASTER_KEY", base64.urlsafe_b64encode(b"A" * 32).decode())
@@ -73,6 +73,7 @@ async def accounts(tmp_path, monkeypatch):
         web_allowed_domains=["team.test"],
         executor="docker",
         docker_image="python:3.12-slim",
+        **getattr(request, "param", {}),
     )
     path = tmp_path / "gateway.yaml"
     save(path, c)
@@ -232,6 +233,7 @@ async def test_accounts_separate_bots_chats_jobs_and_event_streams(accounts):
         assert (await client.get("/api/bots")).status_code == 200
     bot = (await alice.post("/api/bots", json={"name": "Private", "role": "Only Alice"})).json()
     assert (await bob.get(f"/api/bots/{bot['id']}/messages")).status_code == 404
+    assert (await bob.get(f"/api/bots/{bot['id']}/export")).status_code == 404
     assert (
         await alice.post(
             "/api/jobs", json={"bot": bot["id"], "when": "every 1h", "task": "private"}
@@ -533,6 +535,8 @@ async def test_web_runs_and_streams_are_owned_by_the_signed_in_account(accounts)
     assert (await bob.get("/api/runs")).json() == []
     assert (await bob.get(path)).status_code == 404
     assert (await bob.get(path + "/events")).status_code == 404
+    assert (await bob.get(path + "/activity")).status_code == 404
+    assert (await alice.get(path + "/activity")).status_code == 200
     assert (await bob.post(path + "/stop")).status_code == 404
     assert (await bob.get("/api/approvals", params={"run": result.json()["id"]})).status_code == 404
     assert (await alice.get(path)).json()["id"] == result.json()["id"]

@@ -5,6 +5,7 @@ import codecs
 import json
 import re
 
+from delta_gateway.documents import MAX_DOCUMENT_BYTES
 from delta_gateway.google_api import request, segment
 from delta_gateway.plugin_schema import OFFSET, TEXT, tool
 
@@ -52,6 +53,17 @@ DRIVE_TOOLS = [
             "export_mime": TEXT,
             "offset": OFFSET,
             "version": TEXT,
+        },
+        ["file_id"],
+    ),
+    tool(
+        "drive_extract_document",
+        "Extract text from an uploaded PDF, PNG or JPEG on the gateway. "
+        "Choose a page and pass nextOffset to continue it.",
+        {
+            "file_id": TEXT,
+            "page": {"type": "integer", "minimum": 1, "maximum": 100},
+            "offset": OFFSET,
         },
         ["file_id"],
     ),
@@ -158,7 +170,7 @@ async def media_page(http, headers, url, params, offset, limit, *, export):
         return bytes(data[:limit]), more
 
 
-async def drive(http, headers, name, args):
+async def drive(http, headers, name, args, *, documents=None):
     if name == "drive_search":
         return await search(http, headers, args)
     file_id = args["file_id"]
@@ -183,6 +195,29 @@ async def drive(http, headers, name, args):
         raise ValueError("The file changed. Restart from byte zero to read the new version.")
     if metadata.get("capabilities", {}).get("canDownload") is False:
         raise ValueError("Drive does not allow downloading this file")
+    if name == "drive_extract_document":
+        if documents is None or mime not in {"application/pdf", "image/png", "image/jpeg"}:
+            raise ValueError("Select an uploaded PDF, PNG or JPEG to extract")
+        if int(metadata.get("size") or 0) > MAX_DOCUMENT_BYTES:
+            raise ValueError("The attachment exceeds 8 MiB")
+        data, more = await media_page(
+            http,
+            headers,
+            url,
+            {"alt": "media", "supportsAllDrives": "true"},
+            0,
+            MAX_DOCUMENT_BYTES,
+            export=False,
+        )
+        if more:
+            raise ValueError("The attachment exceeds 8 MiB")
+        if version:
+            current = await request(
+                http, headers, "GET", url, params={"fields": "version", "supportsAllDrives": "true"}
+            )
+            if current.get("version") != version:
+                raise ValueError("The attachment changed during the download. Try again.")
+        return {"id": file_id, "version": version, **await documents.read(data, mime, args)}
     export = mime.startswith(GOOGLE_FILE)
     offset = args.get("offset", 0)
     if offset and version and not args.get("version"):

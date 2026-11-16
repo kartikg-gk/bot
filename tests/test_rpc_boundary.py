@@ -1,4 +1,5 @@
 import asyncio
+import sys
 
 import pytest
 
@@ -8,6 +9,8 @@ from delta_gateway.errors import WorkerLost
 from delta_gateway.tools import computer_tools
 from tests.fake_session import create
 from tests.test_gateway import config
+
+PYTHON = f'"{sys.executable}"'
 
 
 def client_for(tmp_path, **settings):
@@ -59,7 +62,7 @@ async def test_commands_never_see_gateway_secrets(tmp_path, monkeypatch):
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "12345:private-fake-value")
     computer = LocalComputer(tmp_path, {"TELEGRAM_BOT_TOKEN"})
     code, output = await computer.run(
-        "python -c \"import os;print(os.environ.get('TELEGRAM_BOT_TOKEN','absent'))\"", 30
+        f"{PYTHON} -c \"import os;print(os.environ.get('TELEGRAM_BOT_TOKEN','absent'))\"", 30
     )
     assert code == 0 and output.decode().strip() == "absent"
 
@@ -82,7 +85,9 @@ async def test_tools_read_write_edit_and_run_on_the_computer(tmp_path):
         str(tmp_path / "relative.txt")
         in (await read.run("4", dict(file_path="relative.txt"))).content[0].text
     )
-    listing = (await bash.run("5", dict(command='python -c "print(6*7)"'))).content[0].text
+    listing = (await bash.run("5", dict(command=f'{PYTHON} -c "print(6*7)"'))).content[0].text
     assert "42" in listing
-    timed = await bash.run("6", dict(command='python -c "import time;time.sleep(5)"', timeout=200))
+    timed = await bash.run(
+        "6", dict(command=f'{PYTHON} -c "import time;time.sleep(5)"', timeout=200)
+    )
     assert "timed out" in timed.content[0].text

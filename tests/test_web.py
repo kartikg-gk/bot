@@ -27,13 +27,13 @@ async def web(tmp_path, monkeypatch):
     await service.close()
 
 
-async def events(client, count):
+async def events(client, count=None, *, until=None):
     found = []
     async with client.stream("GET", "/api/stream", timeout=20) as response:
         async for line in response.aiter_lines():
             if line.startswith("data: "):
                 found.append(json.loads(line[6:]))
-                if len(found) >= count:
+                if (count is not None and len(found) >= count) or (until and until(found[-1])):
                     return found
     return found
 
@@ -66,17 +66,25 @@ async def test_proxy_ingress_requires_both_secrets_for_bearer_api(tmp_path, monk
 
 async def test_message_runs_and_reply_streams_back(web):
     service, client, telegram = web
-    listener = asyncio.create_task(events(client, 3))
+
+    def final_reply(record):
+        return record["type"] == "message" and "turn 1" in record["text"]
+
+    listener = asyncio.create_task(events(client, until=final_reply))
     await asyncio.sleep(0.2)
     response = await client.post("/api/messages", json={"text": "hello"})
     assert response.status_code == 202
     await settle(service)
     found = await asyncio.wait_for(listener, 20)
-    assert any(r["type"] == "message" and "turn 1" in r["text"] for r in found)
+    reply = found[-1]
+    assert final_reply(reply)
+    assert reply["html"].startswith("<p>")
     assert telegram.sent == []
     history = (await client.get("/api/messages")).json()
     assert history[0] == {**history[0], "direction": "inbound", "text": "hello"}
     assert "turn 1" in history[-1]["text"]
+    assert "turn 1" in history[-1]["html"]
+    assert "html" not in history[0]
 
 
 async def test_approval_from_the_page(web, tmp_path):
@@ -122,3 +130,22 @@ def test_short_token_is_refused(tmp_path, monkeypatch):
     monkeypatch.setenv("DELTA_GATEWAY_WEB_TOKEN", "short")
     with pytest.raises(RuntimeError):
         WebServer(None, None)
+
+
+def test_reply_markup_supports_markdown_without_active_html_or_remote_images():
+    from delta_gateway.web import reply_markup
+
+    raw = (
+        "## Heading\n\n**bold** and [example](https://example.org)\n\n"
+        "```python\nprint('hello')\n```\n\n"
+        "<img src=x onerror=alert(1)>\n\n"
+        "![remote](https://example.org/image.png) [bad](javascript:alert%281%29)"
+    )
+    rendered = reply_markup({"text": raw})
+    assert rendered["text"] == raw
+    assert "<h2>Heading</h2>" in rendered["html"]
+    assert "<strong>bold</strong>" in rendered["html"]
+    assert '<code class="language-python">' in rendered["html"]
+    assert 'href="https://example.org"' in rendered["html"]
+    assert "<img" not in rendered["html"]
+    assert 'href="javascript:' not in rendered["html"]

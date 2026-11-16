@@ -1,7 +1,7 @@
 [project]
 name = "delta-gateway"
 version = "0.1.0"
-description = "A subprocess gateway for persistent Delta sessions"
+description = "A Telegram and web gateway that runs Delta agent sessions in-process"
 requires-python = ">=3.12"
 dependencies = ["deltaa>=0.3.0", "pydantic>=2.7", "httpx>=0.27", "python-telegram-bot>=22.7,<23", "PyYAML>=6", "prompt-toolkit>=3", "packaging>=24"]
 
@@ -19,6 +19,7 @@ daytona = [
 ]
 web = [
     "aiohttp>=3.14.5",
+    "markdown-it-py>=4.0,<5",
 ]
 
 accounts = [

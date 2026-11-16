@@ -182,6 +182,27 @@ class RunJournal:
             )
         ]
 
+    def activity(self, run):
+        rows = self.db.execute(
+            "SELECT seq,kind,data FROM web_run_events WHERE instance=? AND run=? "
+            "AND kind IN ('tool_started','tool_finished') ORDER BY seq",
+            (self.instance, run),
+        )
+        events = []
+        for seq, kind, raw in rows:
+            data = json.loads(raw)
+            events.append(
+                dict(
+                    seq=seq,
+                    type=kind,
+                    id=data.get("id"),
+                    bot=data.get("bot"),
+                    tool=data.get("tool"),
+                    failed=bool(data.get("failed")),
+                )
+            )
+        return events
+
     def subscribe(self, run):
         event = asyncio.Event()
         self.listeners[run].add(event)

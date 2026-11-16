@@ -76,3 +76,36 @@ async def test_greeting_is_generated_and_cached(web):
     second = await client.post(path)
     assert second.json() == first.json()
     assert service.store.db.execute("SELECT count(*) FROM bot_chat").fetchone()[0] == before
+
+
+async def test_export_includes_older_messages_and_only_the_requested_bot(web):
+    from delta_gateway.bot_profiles import record_chat
+
+    service, client, _ = web
+    bot = service.store.create_bot("Reader", "Read documents")
+    other = service.store.create_bot("Other", "Different workspace")
+    for number in range(201):
+        record_chat(service.store, bot.id, "user", f"Question {number}")
+    record_chat(service.store, other.id, "user", "Other bot")
+    path = f"/api/bots/{bot.id}"
+    assert len((await client.get(path + "/messages")).json()) == 200
+    exported = await client.get(path + "/export")
+    assert exported.headers["Cache-Control"] == "no-store"
+    assert exported.json() == [
+        {"role": "user", "text": f"Question {number}"} for number in range(201)
+    ]
+
+
+async def test_reply_counts_exclude_prompts_and_count_each_bot(web):
+    from delta_gateway.bot_profiles import record_chat
+
+    service, client, _ = web
+    bot = service.store.create_bot("Reader", "Read documents")
+    other = service.store.create_bot("Other", "Different workspace")
+    record_chat(service.store, bot.id, "user", "Prompt")
+    record_chat(service.store, bot.id, "assistant", "Answer")
+    record_chat(service.store, bot.id, "assistant", "Follow-up")
+    record_chat(service.store, other.id, "assistant", "Other answer")
+    response = await client.get("/api/bots/unread-counts")
+    assert response.headers["Cache-Control"] == "no-store"
+    assert response.json() == {bot.id: 2, other.id: 1}

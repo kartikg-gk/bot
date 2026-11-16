@@ -16,6 +16,8 @@ from tests.test_rpc_boundary import until
 
 APP_CALLS = {
     "tinyfish_fetch": {"url": "https://example.test/"},
+    "web_scrape": {"url": "https://example.test/"},
+    "telegram_send_message": {"text": "Reviewed fixture"},
     "tinyfish_agent": {
         "url": "https://example.test/",
         "goal": "Read heading",

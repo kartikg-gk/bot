@@ -8,7 +8,7 @@ from aiohttp import web
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from delta_gateway.bot_profiles import profile, record_chat, reserve, save_profile
-from delta_gateway.web import ResourceScope
+from delta_gateway.web import ResourceScope, reply_markup
 
 
 class BotChanges(BaseModel):
@@ -25,10 +25,12 @@ class BotChanges(BaseModel):
 class BotAPI(ResourceScope):
     def install(self, app):
         app.router.add_get("/api/bots", self.list)
+        app.router.add_get("/api/bots/unread-counts", self.reply_counts)
         app.router.add_post("/api/bots", self.create)
         app.router.add_patch("/api/bots/{bot}", self.update)
         app.router.add_delete("/api/bots/{bot}", self.delete)
         app.router.add_get("/api/bots/{bot}/messages", self.messages)
+        app.router.add_get("/api/bots/{bot}/export", self.export)
         app.router.add_post("/api/bots/{bot}/select", self.select)
         app.router.add_post("/api/bots/{bot}/greeting", self.greeting)
 
@@ -65,6 +67,13 @@ class BotAPI(ResourceScope):
         return web.json_response(
             [{**self.view(bot), "selected": bot.id == selected} for bot in self.store.bots()]
         )
+
+    async def reply_counts(self, request):
+        rows = self.store.db.execute(
+            "SELECT bot,count(*) FROM bot_chat WHERE instance=? AND role='assistant' GROUP BY bot",
+            (self.store.instance,),
+        )
+        return web.json_response(dict(rows), headers={"Cache-Control": "no-store"})
 
     async def create(self, request):
         values = await self.changes(request)
@@ -198,7 +207,21 @@ class BotAPI(ResourceScope):
             "SELECT role,text FROM bot_chat WHERE instance=? AND bot=? ORDER BY id DESC LIMIT 200",
             (self.store.instance, bot.id),
         ).fetchall()
-        return web.json_response([dict(role=role, text=text) for role, text in reversed(rows)])
+        messages = [dict(role=role, text=text) for role, text in reversed(rows)]
+        return web.json_response(
+            [reply_markup(row) if row["role"] == "assistant" else row for row in messages]
+        )
+
+    async def export(self, request):
+        bot = self.bot(request)
+        rows = self.store.db.execute(
+            "SELECT role,text FROM bot_chat WHERE instance=? AND bot=? ORDER BY id",
+            (self.store.instance, bot.id),
+        )
+        return web.json_response(
+            [dict(role=role, text=text) for role, text in rows],
+            headers={"Cache-Control": "no-store"},
+        )
 
     async def greeting(self, request):
         bot = self.bot(request)

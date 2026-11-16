@@ -14,6 +14,7 @@ class RunAPI(ResourceScope):
         app.router.add_post("/api/runs", self.create)
         app.router.add_get("/api/runs/{run}", self.get)
         app.router.add_get("/api/runs/{run}/events", self.stream)
+        app.router.add_get("/api/runs/{run}/activity", self.activity)
         app.router.add_post("/api/runs/{run}/stop", self.stop)
         app.router.add_post("/api/bots/{bot}/runs/{run}/stop", self.stop)
         app.router.add_get("/api/approvals", self.approvals)
@@ -68,6 +69,11 @@ class RunAPI(ResourceScope):
 
     async def get(self, request):
         return web.json_response(self.lookup(request.match_info["run"]))
+
+    async def activity(self, request):
+        run = request.match_info["run"]
+        self.lookup(run)
+        return web.json_response(self.journal.activity(run), headers={"Cache-Control": "no-store"})
 
     async def stop(self, request):
         run = request.match_info["run"]

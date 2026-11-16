@@ -4,15 +4,29 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Delta Gateway</title>
+<script>
+const systemTheme = matchMedia("(prefers-color-scheme: dark)");
+let theme = "system";
+try {
+  const saved = localStorage.getItem("delta-gateway-theme");
+  if (["light", "dark"].includes(saved)) theme = saved;
+} catch (error) {}
+function applyTheme() {
+  document.documentElement.dataset.theme = theme === "system"
+    ? (systemTheme.matches ? "dark" : "light") : theme;
+}
+systemTheme.addEventListener("change", applyTheme);
+applyTheme();
+</script>
 <style>
 :root {
   --bg: #f3f5f4; --panel: #ffffff; --fg: #18211f; --muted: #5d6b67; --line: #d6dddb;
   --accent: #1f6b5c; --accent-fg: #ffffff; --you: #e3efec; --warn: #8a4b08;
   font: 15px/1.5 "Segoe UI", system-ui, sans-serif;
 }
-@media (prefers-color-scheme: dark) {
-  :root { --bg: #111715; --panel: #18201e; --fg: #e4ebe9; --muted: #95a39f; --line: #2c3633;
-    --accent: #5fbfa8; --accent-fg: #0d1513; --you: #1d2d29; --warn: #e8b36e; color-scheme: dark; }
+:root[data-theme="dark"] {
+  --bg: #111715; --panel: #18201e; --fg: #e4ebe9; --muted: #95a39f; --line: #2c3633;
+  --accent: #5fbfa8; --accent-fg: #0d1513; --you: #1d2d29; --warn: #e8b36e; color-scheme: dark;
 }
 * { box-sizing: border-box; }
 .avatar { display:inline-grid;place-items:center;width:32px;height:32px;background:var(--accent);color:white;margin-right:8px; }
@@ -33,6 +47,15 @@ header { padding: 12px 20px; border-bottom: 1px solid var(--line); font-weight: 
 .message { max-width: 72ch; padding: 10px 14px; border-radius: 8px; background: var(--panel);
   border: 1px solid var(--line); white-space: pre-wrap; overflow-wrap: anywhere; }
 .message.you { background: var(--you); justify-self: end; }
+.message.rich { white-space: normal; min-width: 0; }
+.message.rich > :first-child { margin-top: 0; }
+.message.rich > :last-child { margin-bottom: 0; }
+.message.rich a { color: var(--accent); }
+.message.rich pre, .tool-path { padding: 8px; border: 1px solid var(--line);
+  border-radius: 6px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.message.rich blockquote { margin-left: 0; padding-left: 12px; border-left: 3px solid var(--line); }
+.tool-path { margin: 6px 0 0; }
+.attachment { justify-self: start; }
 .message .buttons { display: flex; gap: 8px; margin-top: 8px; }
 .draft { color: var(--muted); font-style: italic; white-space: pre-wrap; }
 form { display: flex; gap: 8px; padding: 12px 20px; border-top: 1px solid var(--line); }
@@ -72,6 +95,13 @@ aside h2 { font-size: 14px; margin: 0 0 8px; color: var(--muted); text-transform
     <button id="account-button" type="button" hidden>Account</button>
     <button id="apps-button" type="button" hidden>Apps</button>
     <button id="logout-button" type="button" hidden>Sign out</button>
+    <select id="theme" aria-label="Color theme">
+      <option value="system">System theme</option><option value="light">Light</option>
+      <option value="dark">Dark</option>
+    </select>
+    <button id="export-chat" type="button" disabled>Export chat</button>
+    <button id="activity-button" type="button" disabled>Activity</button>
+    <button id="notifications" type="button" aria-pressed="false" hidden>Notifications</button>
   </header>
   <div id="log" aria-live="polite"></div>
   <form id="compose">
@@ -91,6 +121,13 @@ aside h2 { font-size: 14px; margin: 0 0 8px; color: var(--muted); text-transform
   <h2 style="margin-top: 20px">Live tool activity</h2>
   <div id="activity">No tool calls yet.</div>
 </aside>
+<dialog id="activity-dialog">
+  <h2>Run activity</h2>
+  <label>Run <select id="activity-run"></select></label>
+  <p id="activity-error" role="status"></p>
+  <div id="activity-history" style="max-height:50vh;overflow:auto"></div>
+  <form method="dialog"><button>Close</button></form>
+</dialog>
 <dialog id="bot-dialog">
   <form id="bot-form" style="display:grid">
     <h2 id="bot-form-title">Bot settings</h2>
@@ -200,8 +237,13 @@ function showTool(record) {
   let item = toolRows.get(record.id);
   if (!item) {
     if (!toolRows.size) activity.replaceChildren();
-    item = { row: document.createElement("div"), path: "" };
-    item.row.className = "task";
+    const row = document.createElement("details");
+    const title = document.createElement("summary");
+    const path = document.createElement("pre");
+    path.className = "tool-path";
+    row.className = "task";
+    row.append(title, path);
+    item = {row, title, path};
     toolRows.set(record.id, item);
     activity.prepend(item.row);
     if (toolRows.size > 30) {
@@ -210,9 +252,9 @@ function showTool(record) {
       toolRows.delete(oldest);
     }
   }
-  item.path = record.path || item.path;
-  item.row.textContent = record.name + " · " + record.status +
-    (item.path ? " · " + item.path : "");
+  if (record.path) item.path.textContent = record.path;
+  item.path.hidden = !item.path.textContent;
+  item.title.textContent = record.name + " · " + record.status;
 }
 
 function api(path, options = {}) {
@@ -220,10 +262,16 @@ function api(path, options = {}) {
     Authorization: "Bearer " + token, "Content-Type": "application/json" } });
 }
 
-function add(text, you, id) {
+function renderReply(box, text, html) {
+  box.classList.toggle("rich", typeof html === "string");
+  if (typeof html === "string") box.innerHTML = html;
+  else box.textContent = text;
+}
+
+function add(text, you, id, html) {
   const box = document.createElement("div");
   box.className = "message" + (you ? " you" : "");
-  box.textContent = text;
+  renderReply(box, text, you ? undefined : html);
   log.insertBefore(box, drafts.isConnected ? drafts : null);
   if (id) shown.set(id, box);
   log.scrollTop = log.scrollHeight;
@@ -338,7 +386,7 @@ async function follow() {
       } else if (record.type === "message" && record.text !== "Working…") {
         document.getElementById("bot-avatar").classList.remove("working");
         drafts.remove();
-        add(record.text, false, record.id);
+        add(record.text, false, record.id, record.html);
         loadRunControls();
       } else if (record.type === "draft") {
         document.getElementById("bot-avatar").classList.add("working");
@@ -346,11 +394,17 @@ async function follow() {
         log.append(drafts);
         log.scrollTop = log.scrollHeight;
       } else if (record.type === "edit" && shown.has(record.id)) {
-        shown.get(record.id).textContent = record.text;
+        renderReply(shown.get(record.id), record.text, record.html);
       } else if (record.type === "tool") {
         showTool(record);
       } else if (record.type === "file") {
-        add("File " + record.name + " (" + record.content.length + " characters)", false);
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "attachment quiet";
+        button.textContent = "Download " + record.name;
+        button.onclick = () => downloadFile(new Blob([record.content],
+          {type: "application/octet-stream"}), record.name);
+        log.insertBefore(button, drafts.isConnected ? drafts : null);
       }
     }
   }
@@ -396,7 +450,7 @@ async function open() {
     return;
   }
   document.getElementById("login").hidden = true;
-  for (const row of await response.json()) add(row.text, row.direction === "inbound");
+  for (const row of await response.json()) add(row.text, row.direction === "inbound", null, row.html);
   await refreshBots();
   if (selectedBot && !(await loadBotChat()) && !log.children.length) {
     if (!googleMode || accountSettings.provider) await greetBot();
@@ -408,6 +462,8 @@ async function open() {
   }
   loadTasks();
   setInterval(loadTasks, 5000);
+  await refreshUnread();
+  setInterval(refreshUnread, 5000);
   setInterval(loadRunControls, 2500);
   for (;;) {
     try { await follow(); } catch (error) { /* reconnect below */ }
@@ -452,6 +508,155 @@ let editingBot = null;
 const picker = document.getElementById("bot-picker");
 const botDialog = document.getElementById("bot-dialog");
 const botForm = document.getElementById("bot-form");
+const themePicker = document.getElementById("theme");
+themePicker.value = theme;
+themePicker.onchange = () => {
+  theme = themePicker.value;
+  applyTheme();
+  try { localStorage.setItem("delta-gateway-theme", theme); } catch (error) {}
+};
+
+function downloadFile(blob, name) {
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = name;
+  document.body.append(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+const notificationButton = document.getElementById("notifications");
+let notify = false;
+if ("Notification" in window) {
+  notificationButton.hidden = false;
+  try { notify = localStorage.getItem("delta-gateway-notify") === "true"; } catch (error) {}
+  notificationButton.setAttribute("aria-pressed", notify && Notification.permission === "granted");
+  notificationButton.onclick = async () => {
+    try {
+      notify = !notify && await Notification.requestPermission() === "granted";
+      notificationButton.setAttribute("aria-pressed", notify);
+      localStorage.setItem("delta-gateway-notify", notify);
+    } catch (error) {
+      runControlsError.textContent = "Desktop notifications are unavailable.";
+    }
+  };
+}
+const unread = new Map();
+let readingUnread = false;
+
+function updateBotLabels() {
+  for (const option of picker.options) {
+    const bot = bots.find(bot => bot.id === option.value);
+    if (!bot) continue;
+    const state = unread.get(bot.id);
+    const count = state ? state.total - state.read : 0;
+    option.textContent = bot.name + (bot.busy ? " · working" : "") +
+      (count ? " · " + count + " unread" : "");
+  }
+}
+
+function markSelectedRead() {
+  const state = unread.get(selectedBot?.id);
+  if (state && !document.hidden) state.read = state.total;
+  updateBotLabels();
+}
+
+document.addEventListener("visibilitychange", markSelectedRead);
+
+async function refreshUnread() {
+  if (readingUnread) return;
+  readingUnread = true;
+  try {
+    const counts = await botRequest("/api/bots/unread-counts");
+    for (const bot of bots) {
+      const total = counts[bot.id] || 0;
+      const previous = unread.get(bot.id);
+      const read = previous ? Math.min(previous.read, total) : total;
+      unread.set(bot.id, {total, read});
+      if (previous && total > previous.total && document.hidden &&
+          notify && Notification.permission === "granted") {
+        try {
+          new Notification("Delta Gateway", {body: "You have a new bot reply.", tag: "delta-reply"});
+        } catch (error) {}
+      }
+    }
+    markSelectedRead();
+  } catch (error) {
+    // Retry on the next poll without clearing known counts.
+  } finally { readingUnread = false; }
+}
+
+const activityButton = document.getElementById("activity-button");
+const activityDialog = document.getElementById("activity-dialog");
+const activityRun = document.getElementById("activity-run");
+const activityError = document.getElementById("activity-error");
+const activityHistory = document.getElementById("activity-history");
+let activityVersion = 0;
+
+async function refreshActivity() {
+  if (!activityDialog.open || !selectedBot) return;
+  const version = ++activityVersion;
+  activityError.textContent = "";
+  try {
+    const query = "?bot=" + encodeURIComponent(selectedBot.id);
+    const [active, recent] = await Promise.all([
+      botRequest("/api/runs" + query), botRequest("/api/runs" + query + "&recent=1")
+    ]);
+    if (version !== activityVersion || !activityDialog.open) return;
+    const selected = activityRun.value;
+    const runs = new Map([...active, ...recent].map(run => [run.id, run]));
+    activityRun.replaceChildren(...[...runs.values()].map(run => {
+      const option = document.createElement("option");
+      option.value = run.id;
+      option.textContent = new Date(run.created * 1000).toLocaleString() + " · " + run.status;
+      return option;
+    }));
+    if (runs.has(selected)) activityRun.value = selected;
+    if (!activityRun.value) {
+      activityHistory.textContent = "No recorded runs.";
+      return;
+    }
+    const path = "/api/runs/" + encodeURIComponent(activityRun.value) + "/activity";
+    const records = await botRequest(path);
+    if (version !== activityVersion || !activityDialog.open) return;
+    const calls = new Map();
+    for (const event of records) calls.set(JSON.stringify([event.bot, event.id]), event);
+    activityHistory.replaceChildren(...[...calls.values()].map(event => {
+      const row = document.createElement("div");
+      row.className = "task";
+      const status = event.type === "tool_started" ? "started" : event.failed ? "failed" : "finished";
+      row.textContent = botNameForRun(event.bot) + " · " + event.tool + " · " + status;
+      return row;
+    }));
+    if (!calls.size) activityHistory.textContent = "No tool activity recorded for this run.";
+  } catch (error) {
+    if (version === activityVersion && activityDialog.open) activityError.textContent = error.message;
+  }
+}
+
+activityButton.onclick = () => {
+  activityRun.replaceChildren();
+  activityHistory.replaceChildren();
+  activityDialog.showModal();
+  refreshActivity();
+};
+activityRun.onchange = refreshActivity;
+setInterval(refreshActivity, 3000);
+
+const exportChat = document.getElementById("export-chat");
+exportChat.onclick = async () => {
+  const bot = selectedBot;
+  if (!bot) return;
+  exportChat.disabled = true;
+  try {
+    const response = await api("/api/bots/" + encodeURIComponent(bot.id) + "/export");
+    if (!response.ok) throw new Error("Chat export failed (" + response.status + ")");
+    downloadFile(await response.blob(), "delta-chat-" + bot.id + ".json");
+  } catch (error) { runControlsError.textContent = error.message; }
+  finally { exportChat.disabled = !selectedBot; }
+};
 
 async function botRequest(path, options = {}) {
   const response = await api(path, options);
@@ -470,11 +675,13 @@ async function refreshBots(preferred) {
   picker.replaceChildren(...bots.map(bot => {
     const option = document.createElement("option");
     option.value = bot.id;
-    option.textContent = bot.name + (bot.busy ? " · working" : "");
     return option;
   }));
   selectedBot = bots.find(bot => bot.id === preferred) || bots.find(bot => bot.selected) || bots[0];
+  exportChat.disabled = !selectedBot;
+  activityButton.disabled = !selectedBot;
   if (selectedBot) { picker.value = selectedBot.id; showAvatar(selectedBot); }
+  updateBotLabels();
 }
 
 async function loadBotChat() {
@@ -482,7 +689,7 @@ async function loadBotChat() {
   // Older installations can still show their original route transcript.
   if (!messages.length) return false;
   log.replaceChildren(); shown.clear(); drafts.remove();
-  for (const message of messages) add(message.text, message.role === "user");
+  for (const message of messages) add(message.text, message.role === "user", null, message.html);
   return true;
 }
 
@@ -493,6 +700,7 @@ picker.onchange = async () => {
     log.replaceChildren(); shown.clear(); drafts.remove();
     if (!(await loadBotChat())) await greetBot();
     showAvatar(selectedBot);
+    markSelectedRead();
   } catch (error) {
     selectedBot = previous; picker.value = previous.id; add(error.message, false);
   }
@@ -775,7 +983,7 @@ const appLabels = {
   github:"GitHub", gmail:"Gmail", calendar:"Google Calendar", tasks:"Google Tasks",
   drive:"Google Drive", docs:"Google Docs", sheets:"Google Sheets", contacts:"Google Contacts",
   notion:"Notion", linear:"Linear", todoist:"Todoist", wispr:"Wispr Flow", granola:"Granola",
-  tinyfish:"TinyFish", bland:"Bland AI",
+  tinyfish:"TinyFish", bland:"Bland AI", telegram:"Telegram",
 };
 
 async function appAction(action) {
@@ -845,10 +1053,15 @@ async function refreshApps() {
           await refreshApps();
           if (!result.providerRevoked) appsStatus.textContent = app.id === "wispr"
             ? "Disconnected here. Wispr Flow did not advertise a revocation endpoint."
+            : app.id === "telegram" ? "Telegram chat disconnected."
             : "Disconnected here. Revoke access in the provider settings.";
         } else {
           const result = await botRequest("/api/apps/" + app.id + "/connect", {method:"POST"});
-          location.assign(result.url);
+          if (app.id === "telegram") {
+            pairing.hidden = false;
+            link.href = result.url;
+            status.textContent = "Open Telegram, press Start, then confirm the private chat here.";
+          } else location.assign(result.url);
         }
       } finally { button.disabled = false; }
     });
@@ -857,6 +1070,29 @@ async function refreshApps() {
       (app.configured ? "Ready to connect." : "OAuth client setup is required on the gateway.");
     section.append(title, status);
     if (!app.keyAuth || app.saved) section.append(button);
+    const pairing = document.createElement("div");
+    const link = document.createElement("a");
+    if (app.id === "telegram") {
+      if (!app.configured) status.textContent = app.configurationError ||
+        "Configure an outbound Telegram bot on the gateway.";
+      pairing.hidden = true;
+      link.textContent = "Open Telegram";
+      link.target = "_blank";
+      link.rel = "noopener noreferrer";
+      const check = document.createElement("button");
+      check.type = "button";
+      check.textContent = "Confirm linked chat";
+      check.onclick = () => appAction(async () => {
+        check.disabled = true;
+        try {
+          const result = await botRequest("/api/apps/telegram/confirm", {method:"POST"});
+          if (result.connected) await refreshApps();
+          else status.textContent = "No private chat found. Press Start in Telegram, then confirm again.";
+        } finally { check.disabled = false; }
+      });
+      pairing.append(link, " ", check);
+      section.append(pairing);
+    }
     if (app.keyAuth) {
       const form = document.createElement("form");
       const key = document.createElement("input");

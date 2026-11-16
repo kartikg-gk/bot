@@ -706,6 +706,7 @@ memory = [
 ]
 web = [
     { name = "aiohttp" },
+    { name = "markdown-it-py" },
 ]
 
 [package.dev-dependencies]
@@ -728,6 +729,7 @@ requires-dist = [
     { name = "fastembed", marker = "extra == 'memory'", specifier = ">=0.5" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "httpx2", marker = "extra == 'accounts'", specifier = ">=2.16,<3" },
+    { name = "markdown-it-py", marker = "extra == 'web'", specifier = ">=4.0,<5" },
     { name = "mcp", marker = "extra == 'accounts'", specifier = ">=2.3,<3" },
     { name = "mem0ai", marker = "extra == 'memory'", specifier = ">=2.2.1" },
     { name = "packaging", specifier = ">=24" },

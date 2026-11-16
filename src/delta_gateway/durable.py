@@ -26,6 +26,8 @@ DURABLE_TOOLS = {
 APP_REVIEW_TOOLS = (
     {
         "gmail_send",
+        "telegram_send_message",
+        "web_scrape",
         "gmail_modify_labels",
         "github_create_pull_request",
         "todoist_write_tool",

@@ -3,6 +3,7 @@
 import asyncio
 import base64
 import json
+import logging
 import math
 import os
 import re
@@ -24,6 +25,9 @@ from delta_gateway.external_actions import (
 )
 from delta_gateway.granola import check_key, key_valid
 from delta_gateway.plugins import GMAIL_CLIENT_ID, GMAIL_CLIENT_SECRET, PluginRunner
+from delta_gateway.telegram import TelegramError
+from delta_gateway.telegram_links import TOKEN_VARIABLE as TELEGRAM_TOKEN
+from delta_gateway.telegram_links import TelegramLinks
 from delta_gateway.todoist import TODOIST_MCP_URL, TODOIST_SCOPE
 from delta_gateway.wispr import (
     WISPR_AUTH_URL,
@@ -144,6 +148,7 @@ APPS = {
     "granola": OAuthApp("", "", "", ""),
     "tinyfish": OAuthApp("", "", "", ""),
     "bland": OAuthApp("", "", "", ""),
+    "telegram": OAuthApp("", "", "", ""),
 }
 KEY_APPS = {
     "granola": ("Granola", key_valid, check_key),
@@ -166,24 +171,51 @@ class AppConnections:
         self.http = httpx.AsyncClient(transport=transport, timeout=15, trust_env=False)
         self.transport = transport
         self.locks = {}
+        telegram_token = os.environ.get(TELEGRAM_TOKEN, "")
+        self.telegram_configuration_error = None
+        if telegram_token and telegram_token == server.parent.config.token():
+            self.telegram_configuration_error = (
+                f"{TELEGRAM_TOKEN} matches the gateway Telegram bot token. "
+                "Use a separate bot for Telegram linking."
+            )
+            logging.getLogger(__name__).warning(self.telegram_configuration_error)
+            telegram_token = ""
+        self.telegram_links = TelegramLinks(telegram_token, transport)
 
     def install(self, app):
         app.router.add_get("/api/apps", self.list)
         app.router.add_put("/api/apps/{app}/key", self.save_app_key)
         app.router.add_get("/api/apps/bland/calls/{call}", self.bland_call_result)
+        app.router.add_post("/api/apps/telegram/confirm", self.confirm_telegram)
         app.router.add_post("/api/apps/{app}/connect", self.connect)
         app.router.add_delete("/api/apps/{app}", self.disconnect)
         app.router.add_put("/api/apps/{app}/bots/{bot}", self.grant)
         app.router.add_get("/auth/apps/{app}/callback", self.callback)
 
     def configured(self, name):
+        if name == "telegram":
+            return self.telegram_links.bot is not None
         if name == "wispr" or name in KEY_APPS:
             return True
         app = APPS[name]
         return bool(os.environ.get(app.client_id) and os.environ.get(app.secret))
 
     def connected(self, account, name):
+        if name == "telegram":
+            return self.linked_telegram_chat(account) is not None
         return name in APPS and self.configured(name) and name in self.store.names(account, "app")
+
+    def linked_telegram_chat(self, account):
+        if self.telegram_links.bot_id is None:
+            return None
+        try:
+            saved = self.credential(account, "telegram")
+        except ValueError:
+            return None
+        if not isinstance(saved, dict) or saved.get("bot_id") != self.telegram_links.bot_id:
+            return None
+        chat = saved.get("chat_id")
+        return chat if type(chat) is int and chat > 0 else None
 
     def runner(self, account):
         async def token(name):
@@ -192,7 +224,15 @@ class AppConnections:
         async def recover(name, rejected):
             return await self.token(account, name, rejected=rejected)
 
+        async def send_telegram(text):
+            async with self.lock(account, "telegram"):
+                chat = self.linked_telegram_chat(account)
+                if chat is None:
+                    raise ValueError("Link a private Telegram chat in Apps")
+                return await self.telegram_links.send(chat, text)
+
         return PluginRunner(
+            telegram_send=send_telegram,
             transport=self.transport,
             access_token=token,
             recover_token=recover,
@@ -383,9 +423,16 @@ class AppConnections:
                 {
                     "id": name,
                     "configured": self.configured(name),
-                    "connected": name in saved and self.configured(name),
+                    "connected": self.connected(account, name)
+                    if name == "telegram"
+                    else name in saved and self.configured(name),
                     "saved": name in saved,
                     "keyAuth": name in KEY_APPS,
+                    **(
+                        {"configurationError": self.telegram_configuration_error}
+                        if name == "telegram" and self.telegram_configuration_error
+                        else {}
+                    ),
                     "bots": [
                         {
                             "id": bot.id,
@@ -452,8 +499,45 @@ class AppConnections:
             ) from None
         return web.json_response(result)
 
+    async def confirm_telegram(self, request):
+        account = self.identity(request)
+        if not self.configured("telegram"):
+            raise web.HTTPConflict(
+                text=self.telegram_configuration_error or "Configure the gateway Telegram app bot"
+            )
+
+        def save(owner, chat):
+            self.clear_grants(owner, "telegram")
+            self.save(owner, "telegram", {"chat_id": chat, "bot_id": self.telegram_links.bot_id})
+
+        try:
+            await self.telegram_links.confirm(account, save)
+        except TelegramError:
+            raise web.HTTPBadGateway(text="Try confirming the Telegram link again") from None
+        return web.json_response(
+            {"connected": self.connected(account, "telegram")},
+            headers={"Cache-Control": "no-store"},
+        )
+
     async def connect(self, request):
         name, account = self.name(request), self.identity(request)
+        if name == "telegram":
+            if not self.configured(name):
+                raise web.HTTPConflict(
+                    text=self.telegram_configuration_error
+                    or "Configure the gateway Telegram app bot"
+                )
+            if not self.store.validation_attempt(account):
+                raise web.HTTPTooManyRequests(text="Try again in a few minutes")
+            if self.connected(account, name):
+                raise web.HTTPConflict(
+                    text="Disconnect the current Telegram chat before linking again"
+                )
+            try:
+                link = await self.telegram_links.begin(account)
+            except TelegramError:
+                raise web.HTTPBadGateway(text="Telegram link could not be started") from None
+            return web.json_response({"url": link}, headers={"Cache-Control": "no-store"})
         if name in KEY_APPS:
             raise web.HTTPConflict(text=f"Connect {KEY_APPS[name][0]} with an API key in Apps")
         if not self.configured(name):
@@ -517,7 +601,7 @@ class AppConnections:
 
         name, account = self.name(request), self.identity(request)
         state, code = request.query.get("state", ""), request.query.get("code", "")
-        if name in KEY_APPS or len(state) != 43 or not self.configured(name):
+        if name == "telegram" or name in KEY_APPS or len(state) != 43 or not self.configured(name):
             raise web.HTTPBadRequest(text="Start a new app connection")
         async with self.lock(account, name):
             flow = self.store.consume_app_flow(
@@ -559,7 +643,7 @@ class AppConnections:
         )
 
     async def revoke(self, account, name, token):
-        if name == "wispr" or name in KEY_APPS or not self.configured(name):
+        if name in {"wispr", "telegram"} or name in KEY_APPS or not self.configured(name):
             return False
         if name == "notion":
             fields = self.client_fields(name)
@@ -606,6 +690,8 @@ class AppConnections:
         async with self.lock(account, name):
             if self.server.account_from_cookie(request) is None:
                 raise web.HTTPUnauthorized(text="Sign in again before disconnecting an app")
+            if name == "telegram":
+                self.telegram_links.forget(account)
             self.clear_grants(account, name)
             try:
                 token = self.credential(account, name)

@@ -11,6 +11,12 @@ from urllib.parse import quote
 
 import httpx
 
+from delta_gateway.documents import (
+    MAX_DOCUMENT_BYTES,
+    MAX_GMAIL_RESPONSE,
+    Documents,
+    bounded_body,
+)
 from delta_gateway.external_actions import BLAND_TOOLS, TINYFISH_TOOLS, bland, tinyfish
 from delta_gateway.google_contacts import CONTACT_TOOLS, contacts
 from delta_gateway.google_files import DOCS_TOOLS, DRIVE_TOOLS, SHEETS_TOOLS, docs, drive, sheets
@@ -18,6 +24,9 @@ from delta_gateway.google_schedule import CALENDAR_TOOLS, TASK_TOOLS, calendar, 
 from delta_gateway.granola import GRANOLA_TOOLS, granola
 from delta_gateway.plugin_schema import NUMBER, OFFSET, STRING_LIST, TEXT, tool
 from delta_gateway.todoist import TODOIST_TOOLS, todoist
+from delta_gateway.web_research import SCRAPE_TOOLS, SCRAPER_KEY, SEARCH_KEYS, SEARCH_TOOLS
+from delta_gateway.web_research import scrape as web_scrape
+from delta_gateway.web_research import search as web_search
 from delta_gateway.wispr import WISPR_TOOLS, wispr
 from delta_gateway.workspace_apps import LINEAR_TOOLS, NOTION_TOOLS, linear, notion
 
@@ -32,6 +41,9 @@ CREDENTIAL_VARIABLES = {
     GMAIL_CLIENT_ID,
     GMAIL_CLIENT_SECRET,
     GMAIL_REFRESH_TOKEN,
+    *SEARCH_KEYS,
+    SCRAPER_KEY,
+    "DELTA_GATEWAY_TELEGRAM_APP_TOKEN",
     "DELTA_GATEWAY_GITHUB_CLIENT_SECRET",
     "DELTA_GATEWAY_CALENDAR_CLIENT_SECRET",
     "DELTA_GATEWAY_TASKS_CLIENT_SECRET",
@@ -109,9 +121,13 @@ class Plugin:
     name: str
     variables: tuple
     tools: list
+    any_variable: bool = False
 
     def configured(self):
-        return bool(self.variables) and all(os.environ.get(name) for name in self.variables)
+        if not self.variables:
+            return False
+        keys = (bool(os.environ.get(name, "").strip()) for name in self.variables)
+        return any(keys) if self.any_variable else all(keys)
 
 
 GITHUB = Plugin(
@@ -222,6 +238,18 @@ GMAIL = Plugin(
             },
             ["message_id", "part"],
         ),
+        tool(
+            "gmail_extract_attachment",
+            "Extract a page of a PDF, PNG or JPEG Gmail attachment on the gateway. "
+            "Use a message's part reference and pass nextOffset to continue.",
+            {
+                "message_id": TEXT,
+                "part": TEXT,
+                "page": {"type": "integer", "minimum": 1, "maximum": 100},
+                "offset": OFFSET,
+            },
+            ["message_id", "part"],
+        ),
         tool("gmail_list_labels", "List Gmail label names and IDs.", {}),
         tool(
             "gmail_modify_labels",
@@ -262,6 +290,22 @@ WISPR = Plugin("wispr", (), WISPR_TOOLS)
 GRANOLA = Plugin("granola", (), GRANOLA_TOOLS)
 TINYFISH = Plugin("tinyfish", (), TINYFISH_TOOLS)
 BLAND = Plugin("bland", (), BLAND_TOOLS)
+TELEGRAM = Plugin(
+    "telegram",
+    (),
+    [
+        tool(
+            "telegram_send_message",
+            "Send plain text to the signed-in user's linked private Telegram chat. "
+            "Send only when asked. If delivery is uncertain, ask the user to check the chat.",
+            {"text": {"type": "string", "minLength": 1, "maxLength": 3800}},
+            ["text"],
+            write=True,
+        )
+    ],
+)
+WEB_SEARCH = Plugin("web_search", SEARCH_KEYS, SEARCH_TOOLS, any_variable=True)
+WEB_SCRAPE = Plugin("web_scrape", (SCRAPER_KEY,), SCRAPE_TOOLS)
 PLUGINS = {
     plugin.name: plugin
     for plugin in (
@@ -280,6 +324,9 @@ PLUGINS = {
         GRANOLA,
         TINYFISH,
         BLAND,
+        TELEGRAM,
+        WEB_SEARCH,
+        WEB_SCRAPE,
     )
 }
 ACCOUNT_ADAPTERS = {
@@ -382,29 +429,57 @@ def gmail_raw(arguments):
 
 
 class PluginRunner:
-    def __init__(self, *, transport=None, access_token=None, available=None, recover_token=None):
+    def __init__(
+        self,
+        *,
+        transport=None,
+        access_token=None,
+        available=None,
+        recover_token=None,
+        telegram_send=None,
+    ):
         self.http = httpx.AsyncClient(
             transport=transport, timeout=60, trust_env=access_token is None
         )
         self.access_token = access_token
         self.available = available
         self.recover_token = recover_token
+        self.documents = Documents()
+        self.telegram_send = telegram_send
 
     def configured(self, name):
         return self.available(name) if self.available is not None else PLUGINS[name].configured()
 
-    async def run(self, name, arguments):
+    async def run(self, name, arguments, *, bot_name=None):
         owner = TOOL_OWNERS.get(name)
+        if owner == "telegram":
+            if self.telegram_send is None:
+                raise ValueError("Link Telegram from a signed-in gateway account")
+            text = arguments.get("text")
+            if not isinstance(text, str) or not text.strip() or len(text) > 3800:
+                raise ValueError("Enter a Telegram message from 1 to 3800 characters")
+            if bot_name:
+                text = bot_name[:100] + ": " + text
+            return json_output(await self.telegram_send(text))
         if owner == "github":
             return await self.github(name, arguments)
         if owner == "gmail":
             return await self.gmail(name, arguments)
+        if owner in {"web_search", "web_scrape"}:
+            if self.access_token is not None:
+                raise ValueError("Gateway research keys are scoped to the operator instance")
+            adapter = web_search if owner == "web_search" else web_scrape
+            return json_output(await adapter(self.http, arguments))
         adapter = ACCOUNT_ADAPTERS.get(owner)
         if adapter is not None:
             if self.access_token is None:
                 raise ValueError(f"Connect {owner} from a signed-in gateway account")
             token = await self.access_token(owner)
             headers = {"authorization": "Bearer " + token}
+            if name == "drive_extract_document":
+                return json_output(
+                    await drive(self.http, headers, name, arguments, documents=self.documents)
+                )
             try:
                 output = await adapter(self.http, headers, name, arguments)
             except httpx.HTTPStatusError as exc:
@@ -519,14 +594,19 @@ class PluginRunner:
         reply.raise_for_status()
         return dict(authorization="Bearer " + reply.json()["access_token"])
 
-    async def gmail_get(self, path, headers, **params):
+    async def gmail_get(self, path, headers, *, bounded=False, **params):
+        if bounded:
+            async with self.http.stream(
+                "GET", GMAIL_API + path, headers=headers, params=params
+            ) as reply:
+                return json.loads(await bounded_body(reply, MAX_GMAIL_RESPONSE))
         reply = await self.http.get(GMAIL_API + path, headers=headers, params=params)
         reply.raise_for_status()
         return reply.json()
 
-    async def gmail_attachment(self, a, headers):
+    async def gmail_attachment(self, a, headers, *, extract=False):
         message = gmail_id(a["message_id"])
-        data = await self.gmail_get(f"/messages/{message}", headers, format="full")
+        data = await self.gmail_get(f"/messages/{message}", headers, bounded=extract, format="full")
         selected = next(
             (
                 part
@@ -538,10 +618,21 @@ class PluginRunner:
         if selected is None:
             raise ValueError("Attachment part not found in the message")
         body = selected.get("body") or {}
+        if extract and int(body.get("size") or 0) > MAX_DOCUMENT_BYTES:
+            raise ValueError("The attachment exceeds 8 MiB")
         if body.get("attachmentId"):
             identifier = gmail_id(body["attachmentId"])
-            body = await self.gmail_get(f"/messages/{message}/attachments/{identifier}", headers)
+            body = await self.gmail_get(
+                f"/messages/{message}/attachments/{identifier}", headers, bounded=extract
+            )
         raw = decode_gmail(body.get("data") or "")
+        if extract:
+            return json_output(
+                {
+                    "filename": selected.get("filename"),
+                    **await self.documents.read(raw, selected.get("mimeType"), a),
+                }
+            )
         offset = a.get("offset", 0)
         output_format = a.get("format", "text")
         if output_format == "base64":
@@ -587,8 +678,10 @@ class PluginRunner:
                     "nextOffset": end if end < len(messages) else None,
                 }
             )
-        if name == "gmail_read_attachment":
-            return await self.gmail_attachment(a, headers)
+        if name in {"gmail_read_attachment", "gmail_extract_attachment"}:
+            return await self.gmail_attachment(
+                a, headers, extract=name == "gmail_extract_attachment"
+            )
         if name == "gmail_list_labels":
             data = await self.gmail_get("/labels", headers)
             return json_output(data.get("labels", []))

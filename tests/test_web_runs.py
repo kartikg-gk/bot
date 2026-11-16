@@ -102,6 +102,15 @@ async def test_stop_preserves_other_bots_and_queued_messages_and_reload_recovers
     assert not (await client.get("/api/approvals")).json()
     assert (await client.get(f"/api/runs/{keep}")).json()["status"] == "completed"
     assert (service.config.project / "approved.txt").exists()
+    activity = await client.get(f"/api/runs/{first}/activity")
+    assert activity.headers["cache-control"] == "no-store"
+    assert [(row["type"], row["tool"], row["failed"]) for row in activity.json()] == [
+        ("tool_started", "Write", False),
+        ("tool_finished", "Write", False),
+    ]
+    assert all(
+        set(row) == {"seq", "type", "id", "bot", "tool", "failed"} for row in activity.json()
+    )
     records = frames(await client.get(f"/api/runs/{first}/events"))
     assert {"approval_requested", "approval_resolved", "tool_started", "tool_finished"} <= {
         kind for _, kind, _ in records

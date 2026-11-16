@@ -186,6 +186,8 @@ class Team:
         if not self.plugins.configured(plugin):
             raise ValueError(f"{plugin} is not set up on the gateway.")
         try:
+            if plugin == "telegram":
+                return await self.plugins.run(name, arguments, bot_name=bot.name)
             return await self.plugins.run(name, arguments)
         except httpx.HTTPStatusError as exc:
             raise ValueError(f"{plugin} returned HTTP {exc.response.status_code}.") from None

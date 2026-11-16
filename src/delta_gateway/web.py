@@ -13,6 +13,7 @@ import json
 import os
 import re
 from contextvars import ContextVar
+from functools import cache
 from pathlib import Path
 
 from delta_gateway.telegram import TelegramError
@@ -25,6 +26,20 @@ TOKEN_VARIABLE = "DELTA_GATEWAY_WEB_TOKEN"
 PROXY_SECRET_VARIABLE = "DELTA_GATEWAY_PROXY_SECRET"
 PROXY_HEADER = "X-Delta-Gateway-Proxy"
 PAGE = Path(__file__).with_name("web_page.html")
+
+
+@cache
+def _chat_markdown():
+    from markdown_it import MarkdownIt
+
+    return MarkdownIt("commonmark", {"html": False}).disable("image")
+
+
+def reply_markup(record):
+    text = record.get("text")
+    if isinstance(text, str) and 0 < len(text) <= 32_000:
+        return {**record, "html": _chat_markdown().render(text)}
+    return record
 
 
 class WebChannel:
@@ -312,6 +327,7 @@ class WebServer:
             finally:
                 await self.google.http.aclose()
                 await self.models.http.aclose()
+                await self.apps.telegram_links.close()
                 await self.apps.http.aclose()
                 self.accounts.close()
                 self.runtimes = None
@@ -348,7 +364,10 @@ class WebServer:
     async def messages(self, request):
         from aiohttp import web
 
-        return web.json_response(self.service.store.history(WEB_CHAT, self.actor))
+        history = self.service.store.history(WEB_CHAT, self.actor)
+        return web.json_response(
+            [reply_markup(row) if row["direction"] == "outbound" else row for row in history]
+        )
 
     def needs_model(self, request):
         return (
@@ -427,6 +446,8 @@ class WebServer:
                     record = await asyncio.wait_for(queue.get(), 15)
                     if record is None or (self.google and not self.account_from_cookie(request)):
                         break
+                    if record["type"] in {"message", "edit"}:
+                        record = reply_markup(record)
                     await response.write(f"data: {json.dumps(record)}\n\n".encode())
                 except TimeoutError:
                     if self.google and not self.account_from_cookie(request):
