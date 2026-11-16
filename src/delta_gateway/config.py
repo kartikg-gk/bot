@@ -72,6 +72,7 @@ class Config(BaseModel):
     web_port: int | None = Field(default=None, ge=0, le=65535)
     daytona_snapshot: str | None = None
     daytona_archive_minutes: int = Field(default=60, ge=1)
+    sandbox_network: str = Field(default="open", pattern=r"^(open|closed)$")
     memory_enabled: bool = False
     memory_extract: bool = False
     memory_extractor: str = Field(default="mem0", pattern=r"^(mem0|delta)$")
@@ -163,6 +164,7 @@ def document(config):
             daytonaTarget=config.daytona_target,
             daytonaSnapshot=config.daytona_snapshot,
             daytonaArchiveMinutes=config.daytona_archive_minutes,
+            sandboxNetwork=config.sandbox_network,
         ),
         limits=dict(
             workers=config.workers,
@@ -266,6 +268,7 @@ def load(path, *, require_project=True):
                     "daytonaTarget",
                     "daytonaSnapshot",
                     "daytonaArchiveMinutes",
+                    "sandboxNetwork",
                 },
             ),
             (
@@ -323,6 +326,7 @@ def load(path, *, require_project=True):
             daytona_target=d.get("daytonaTarget"),
             daytona_snapshot=d.get("daytonaSnapshot"),
             daytona_archive_minutes=d.get("daytonaArchiveMinutes", 60),
+            sandbox_network=d.get("sandboxNetwork", "open"),
             web_host=w.get("host", "127.0.0.1"),
             web_port=w.get("port"),
             web_only=w.get("standalone", False),

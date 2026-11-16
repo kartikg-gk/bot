@@ -142,13 +142,15 @@ async def test_docker_reuse_requires_read_only_note_mount(tmp_path, writable):
             return 0, b"", b""
         if arguments[2] == "{{.State.Running}}":
             return 0, b"false", b""
+        if arguments[2] == "{{.HostConfig.NetworkMode}}":
+            return 0, b"bridge", b""
         return 0, json.dumps([{"Destination": "/bot/memory", "RW": writable}]).encode(), b""
 
     computer.docker = docker
     if writable:
         with pytest.raises(ComputerError, match="read-only bot note mounts"):
             await computer.start()
-        assert operations == ["inspect", "inspect"]
+        assert operations == ["inspect", "inspect", "inspect"]
     else:
         await computer.start()
-        assert operations == ["inspect", "inspect", "start"]
+        assert operations == ["inspect", "inspect", "inspect", "start"]

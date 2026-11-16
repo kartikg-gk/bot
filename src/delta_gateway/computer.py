@@ -112,12 +112,16 @@ class LocalComputer:
 
 
 class DockerComputer:
-    """A long-lived container per bot with no network. Stopping keeps its files."""
+    """A long-lived container per bot. Stopping keeps its files.
+
+    Outbound network is open unless the gateway is configured to close it.
+    """
 
     posix = True
 
-    def __init__(self, name, image, root, *, memory="2g", mounts=()):
+    def __init__(self, name, image, root, *, memory="2g", mounts=(), network="open"):
         self.name, self.image, self.host_root, self.memory = name, image, str(root), memory
+        self.network = network
         self.mounts = list(mounts)
         self.root = CONTAINER_ROOT
 
@@ -142,6 +146,7 @@ class DockerComputer:
         Path(self.host_root).mkdir(parents=True, exist_ok=True)
         code, output, _ = await self.docker("inspect", "--format", "{{.State.Running}}", self.name)
         if code == 0:
+            await self.verify_network()
             await self.verify_read_only_mounts()
             if output.strip() == b"true":
                 return
@@ -152,8 +157,7 @@ class DockerComputer:
                 "-d",
                 "--name",
                 self.name,
-                "--network",
-                "none",
+                *(("--network", "none") if self.network == "closed" else ()),
                 "--cap-drop",
                 "ALL",
                 "--security-opt",
@@ -174,6 +178,19 @@ class DockerComputer:
             )
         if code:
             raise ComputerError("Could not start the bot's container; check Docker and the image")
+
+    async def verify_network(self):
+        code, output, _ = await self.docker(
+            "inspect", "--format", "{{.HostConfig.NetworkMode}}", self.name
+        )
+        if code:
+            raise ComputerError("Could not verify the container's network setting")
+        closed = output.strip() == b"none"
+        if closed != (self.network == "closed"):
+            raise ComputerError(
+                f"Container {self.name} needs to be recreated to use the {self.network} network"
+                " setting"
+            )
 
     async def verify_read_only_mounts(self):
         expected = {

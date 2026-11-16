@@ -78,6 +78,7 @@ class SessionManager:
                 workspace(self.config, bot),
                 memory=self.config.docker_memory,
                 mounts=[(memory, MEMORY_MOUNT + ":ro")],
+                network=self.config.sandbox_network,
             )
             computer.memory_path = MEMORY_MOUNT
         elif self.config.executor == "daytona":

@@ -105,7 +105,9 @@ def memory(tmp_path):
 async def test_sandbox_is_created_locked_down_then_reused(tmp_path, memory, monkeypatch):
     monkeypatch.setenv("DAYTONA_API_KEY", "test-key")
     fake = sdk()
-    computer = DaytonaComputer("delta-bot-x", config(tmp_path), memory, sdk=fake)
+    computer = DaytonaComputer(
+        "delta-bot-x", config(tmp_path, sandbox_network="closed"), memory, sdk=fake
+    )
     await computer.start()
     sandbox = Client.sandboxes["delta-bot-x"]
     assert sandbox.params.network_block_all is True and sandbox.params.auto_stop_interval == 15

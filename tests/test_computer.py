@@ -35,6 +35,7 @@ async def computer(tmp_path):
         IMAGE,
         tmp_path / "workspace",
         mounts=[(memory, "/bot/memory")],
+        network="closed",
     )
     await result.start()
     yield result
@@ -46,6 +47,18 @@ async def test_container_has_no_network(computer):
         "python -c \"import socket;socket.create_connection(('1.1.1.1',443),3)\"", 30
     )
     assert code != 0
+
+
+async def test_container_reaches_network_when_open(tmp_path):
+    result = DockerComputer(f"delta-test-{uuid4().hex[:8]}", IMAGE, tmp_path / "workspace")
+    await result.start()
+    try:
+        code, _ = await result.run(
+            "python -c \"import socket;socket.create_connection(('1.1.1.1',443),5)\"", 30
+        )
+        assert code == 0
+    finally:
+        await result.remove()
 
 
 async def test_tools_work_inside_and_files_survive_a_stop(computer, tmp_path):

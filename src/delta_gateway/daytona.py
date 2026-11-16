@@ -1,4 +1,6 @@
-"""A bot's computer as a persistent Daytona sandbox with all network blocked.
+"""A bot's computer as a persistent Daytona sandbox.
+
+Outbound network is open unless the gateway is configured to close it.
 
 The sandbox keeps its files between runs and stops itself when idle. It receives a copy
 of the bot's notes at startup. Reviewed note changes are saved by the gateway.
@@ -36,6 +38,19 @@ class DaytonaComputer:
         self.memory_path = "/home/daytona/" + MEMORY_FOLDER
         self.lock = asyncio.Lock()
 
+    async def match_network(self):
+        blocked = self.config.sandbox_network == "closed"
+        current = getattr(self.sandbox, "network_block_all", None)
+        if current is None or bool(current) == blocked:
+            return
+        update = getattr(self.sandbox, "update_network_settings", None)
+        if update is None:
+            raise ComputerError(
+                f"Sandbox {self.name} needs to be recreated to use the"
+                f" {self.config.sandbox_network} network setting"
+            )
+        await update(network_block_all=blocked)
+
     async def start(self):
         async with self.lock:
             sdk = self.sdk or load_sdk()
@@ -45,6 +60,7 @@ class DaytonaComputer:
                 self.client = sdk.AsyncDaytona(sdk.DaytonaConfig(target=self.config.daytona_target))
             try:
                 self.sandbox = await self.client.get(self.name)
+                await self.match_network()
                 if str(self.sandbox.state).lower().split(".")[-1] != "started":
                     await self.sandbox.start()
             except sdk.DaytonaNotFoundError:
@@ -52,7 +68,7 @@ class DaytonaComputer:
                     sdk.CreateSandboxFromSnapshotParams(
                         name=self.name,
                         snapshot=self.config.daytona_snapshot,
-                        network_block_all=True,
+                        network_block_all=self.config.sandbox_network == "closed",
                         auto_stop_interval=IDLE_MINUTES,
                         auto_archive_interval=self.config.daytona_archive_minutes,
                         labels={"delta-gateway": self.config.instance},
