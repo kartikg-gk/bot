@@ -254,3 +254,74 @@ asyncio.run(run_service(load(sys.argv[1]), Bot(), config_path=sys.argv[1], launc
             if child.poll() is None:
                 child.terminate()
                 child.wait(timeout=3)
+
+
+def test_init_keeps_each_database_in_its_own_state_directory(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "a").mkdir()
+    (tmp_path / "b").mkdir()
+    first, second = tmp_path / "a" / "gw.yaml", tmp_path / "b" / "gw.yaml"
+    configure(parser().parse_args(["-c", str(first), "init", "--name", "one", "--user", "11"]))
+    configure(
+        parser().parse_args(
+            [
+                "-c",
+                str(second),
+                "init",
+                "--name",
+                "two",
+                "--user",
+                "11",
+                "--state-dir",
+                str(tmp_path / "custom"),
+            ]
+        )
+    )
+    one, two = load(first), load(second)
+    assert one.database_path == one.state / "gateway.sqlite3"
+    assert two.database_path == tmp_path / "custom" / "gateway.sqlite3"
+    assert one.database_path != two.database_path
+
+
+def test_cli_reports_configuration_problems_instead_of_a_generic_failure(tmp_path, monkeypatch):
+    from delta_gateway.cli import main
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "delta-gateway",
+            "-c",
+            str(tmp_path / "gw.yaml"),
+            "init",
+            "--name",
+            "missing",
+            "--user",
+            "11",
+            "--project",
+            str(tmp_path / "missing"),
+        ],
+    )
+    with pytest.raises(SystemExit) as stop:
+        main()
+    assert "Project must be an existing absolute directory" in str(stop.value)
+
+
+def test_cli_hides_rejected_values_in_validation_errors(tmp_path, monkeypatch):
+    from delta_gateway.cli import main
+
+    secret = "123456:" + "S" * 35
+    monkeypatch.chdir(tmp_path)
+    path = tmp_path / "gw.yaml"
+    configure(parser().parse_args(["-c", str(path), "init", "--name", "bad", "--user", "11"]))
+    path.write_text(
+        path.read_text(encoding="utf-8").replace(
+            "sandboxNetwork: open", "sandboxNetwork: " + secret
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("sys.argv", ["delta-gateway", "-c", str(path), "doctor"])
+    with pytest.raises(SystemExit) as stop:
+        main()
+    assert secret not in str(stop.value)
+    assert "sandbox_network" in str(stop.value) or "Invalid" in str(stop.value)

@@ -122,6 +122,8 @@ def parser():
 
 def main():
     options = parser().parse_args()
+    from pydantic import ValidationError
+
     from delta_gateway.health import operator_command
     from delta_gateway.instances import OperatorError
     from delta_gateway.telegram import TelegramError
@@ -131,6 +133,14 @@ def main():
     except KeyboardInterrupt:
         raise SystemExit(130) from None
     except (OperatorError, TelegramError) as exc:
+        raise SystemExit(str(exc)) from None
+    except ValidationError as exc:
+        problems = "; ".join(
+            ".".join(str(part) for part in error["loc"]) + ": " + error["msg"]
+            for error in exc.errors(include_input=False, include_url=False)
+        )
+        raise SystemExit("Invalid configuration: " + problems) from None
+    except ValueError as exc:
         raise SystemExit(str(exc)) from None
     except Exception:
         raise SystemExit(

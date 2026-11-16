@@ -103,11 +103,13 @@ def configure_path(options, path):
         if not users:
             raise OperatorError("Supply at least one --user with your numeric Telegram ID")
         identifier = uuid4().hex
+        state = (options.state_dir or home() / "state" / identifier).expanduser().resolve()
         config = Config(
             instance=identifier,
             users=users,
             project=(options.project or Path.cwd()).expanduser().resolve(),
-            state=(options.state_dir or home() / "state" / identifier).expanduser().resolve(),
+            state=state,
+            database=state / "gateway.sqlite3",
         )
     else:
         config = previous.model_copy(deep=True)
