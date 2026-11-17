@@ -17,16 +17,6 @@ D1_ENV = {
 }
 
 
-@pytest.fixture(params=["sqlite", "d1"])
-async def database(request, tmp_path):
-    if request.param == "sqlite":
-        db = SqliteDatabase(tmp_path / "test.sqlite3")
-    else:
-        db = FakeD1().database()
-    yield db
-    await db.close()
-
-
 async def test_query_and_run_round_trip(database):
     await database.run("CREATE TABLE items (id TEXT PRIMARY KEY, size INTEGER NOT NULL)")
     await database.run("INSERT INTO items (id, size) VALUES (?, ?)", ["a", 3])

@@ -1,6 +1,12 @@
 "Transactional topic-aware schema migration. Call only with the gateway stopped."
 
-SCHEMA = 17
+import sqlite3
+from functools import cache
+
+SCHEMA = 18
+# Rows that a web request and the runner can both change. Updates go through
+# ``rows.update_versioned``, which only lands on the version it read.
+VERSIONED_TABLES = ("jobs", "web_runs", "approvals", "inbox", "delegations", "scheduler_leases")
 
 
 def migrate(db, version):
@@ -135,6 +141,22 @@ def migrate(db, version):
                 PRAGMA user_version=17;
                 COMMIT;
             """)
+        except BaseException:
+            db.rollback()
+            raise
+
+    if version < 18:
+        try:
+            db.executescript(
+                "BEGIN IMMEDIATE; "
+                + "".join(
+                    f"ALTER TABLE {table} ADD COLUMN version INTEGER NOT NULL DEFAULT 0; "
+                    for table in VERSIONED_TABLES
+                    if "version"
+                    not in {row[1] for row in db.execute(f"PRAGMA table_info({table})")}
+                )
+                + "PRAGMA user_version=18; COMMIT;"
+            )
         except BaseException:
             db.rollback()
             raise
@@ -324,3 +346,57 @@ def migrate_to_four(db, version):
     except BaseException:
         db.rollback()
         raise
+
+
+KINDS = {"table": 0, "index": 1, "view": 2, "trigger": 3}
+MIGRATIONS_TABLE = "CREATE TABLE IF NOT EXISTS schema_migrations (id TEXT PRIMARY KEY)"
+
+
+@cache
+def current_schema():
+    """The statements that create the current schema, tables before what depends on them."""
+    db = sqlite3.connect(":memory:")
+    try:
+        migrate(db, 0)
+        rows = db.execute(
+            "SELECT type, sql FROM sqlite_master WHERE sql IS NOT NULL "
+            "AND name NOT LIKE 'sqlite_%' ORDER BY rowid"
+        ).fetchall()
+    finally:
+        db.close()
+    return tuple(sql for kind, sql in sorted(rows, key=lambda row: KINDS[row[0]]))
+
+
+async def ensure_schema(db):
+    """Bring *db* to the current schema. Safe to repeat and to run from two processes."""
+    from delta_gateway.database import SqliteDatabase
+
+    marker = f"gateway-{SCHEMA}"
+    if isinstance(db, SqliteDatabase):
+        # A local file may be any older version; the step-by-step upgrade handles it.
+        def upgrade(connection):
+            version = connection.execute("PRAGMA user_version").fetchone()[0]
+            if version > SCHEMA:
+                raise ValueError("Database schema is newer than this gateway")
+            migrate(connection, version)
+
+        await db.sync(upgrade)
+        await db.run(MIGRATIONS_TABLE)
+        await db.run("INSERT OR IGNORE INTO schema_migrations (id) VALUES (?)", [marker])
+        return
+    await db.run(MIGRATIONS_TABLE)
+    applied = {row["id"] for row in await db.query("SELECT id FROM schema_migrations")}
+    if marker in applied:
+        return
+    earlier = sorted(name for name in applied if name.startswith("gateway-"))
+    if earlier:
+        raise ValueError(
+            f"Hosted database is at {earlier[-1]}; upgrading it to {marker} is not supported yet"
+        )
+    for statement in current_schema():
+        try:
+            await db.run(statement)
+        except RuntimeError as error:
+            if "already exists" not in str(error):
+                raise
+    await db.run("INSERT OR IGNORE INTO schema_migrations (id) VALUES (?)", [marker])

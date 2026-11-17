@@ -105,6 +105,13 @@ class InboxItem:
         return self.chat, self.user, self.thread
 
 
+INBOX = "inbox(instance,id,chat,user,text,status,run,created,thread,route_user)"
+LEASES = "scheduler_leases(instance,owner,heartbeat,expires)"
+APPROVALS = (
+    "approvals(instance,id,chat,user,run,tool,digest,created,expires,decision,source,thread)"
+)
+
+
 class Store:
     def __init__(self, directory, instance, *, retention_days=None):
         directory = Path(directory)
@@ -341,7 +348,7 @@ class Store:
             ).fetchone()[0]
             identifier = max(newest or 0, 2**60) + 1
             self.db.execute(
-                "INSERT INTO inbox VALUES(?,?,?,?,?,'prompt',NULL,?,?,?)",
+                f"INSERT INTO {INBOX} VALUES(?,?,?,?,?,'prompt',NULL,?,?,?)",
                 (
                     self.instance,
                     identifier,
@@ -365,7 +372,7 @@ class Store:
             identifier = max(newest or 0, base) + 1
             route = route or self.conversation(chat, user)
             self.db.execute(
-                "INSERT INTO inbox VALUES(?,?,?,?,?,?,?,?,?,?)",
+                f"INSERT INTO {INBOX} VALUES(?,?,?,?,?,?,?,?,?,?)",
                 (
                     self.instance,
                     identifier,
@@ -489,7 +496,7 @@ class Store:
                 )
                 wakeups.interrupted(self.db, self.instance, now)
             self.db.execute(
-                "INSERT INTO scheduler_leases VALUES(?,?,?,?) ON CONFLICT(instance) DO UPDATE "
+                f"INSERT INTO {LEASES} VALUES(?,?,?,?) ON CONFLICT(instance) DO UPDATE "
                 "SET owner=excluded.owner,heartbeat=excluded.heartbeat,expires=excluded.expires",
                 (self.instance, owner, now, now + ttl),
             )
@@ -729,7 +736,7 @@ class Store:
                         else "rejected"
                     )
                     inserted = self.db.execute(
-                        "INSERT OR IGNORE INTO inbox VALUES(?,?,?,?,?,?,NULL,?,?,?)",
+                        f"INSERT OR IGNORE INTO {INBOX} VALUES(?,?,?,?,?,?,NULL,?,?,?)",
                         (
                             self.instance,
                             update["update_id"],
@@ -839,7 +846,7 @@ class Store:
     def audit(self, event, chat, user, thread=0):
         with self.db:
             self.db.execute(
-                "INSERT INTO approvals VALUES(?,?,?,?,?,?,?,?,?,NULL,NULL,?)",
+                f"INSERT INTO {APPROVALS} VALUES(?,?,?,?,?,?,?,?,?,NULL,NULL,?)",
                 (
                     self.instance,
                     event["approval_id"],

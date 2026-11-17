@@ -76,6 +76,11 @@ class SqliteDatabase:
     async def check(self):
         await self.query("SELECT 1 AS ok")
 
+    async def sync(self, work):
+        """Run ``work(connection)`` in the worker thread, for steps that need sqlite3 itself."""
+        async with self.lock:
+            return await asyncio.to_thread(work, self.connection)
+
     async def close(self):
         async with self.lock:
             self.connection.close()
