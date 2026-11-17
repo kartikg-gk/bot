@@ -3,6 +3,7 @@
 import json
 
 from delta_gateway.bots import bot_root
+from delta_gateway.file_tables import pull, push
 from delta_gateway.skill_store import NOTES, SkillStore, safe_file, text_file, write_note
 
 TOOLS = [
@@ -51,8 +52,10 @@ async def run(sessions, bot, name, arguments):
     if bot is None or await sessions.store.bot(bot.id) is None:
         raise ValueError("A named bot is required")
     root = bot_root(sessions.config, bot)
+    await pull(sessions.store, sessions.config, bot)
     if name == "write_skill":
         SkillStore(root / "skills").write(arguments["name"], arguments["files"])
+        await push(sessions.store, sessions.config, bot)
         return "Saved. The skill catalog refreshes on the next run."
     filename = arguments.get("file")
     if filename not in NOTES:
@@ -74,4 +77,5 @@ async def run(sessions, bot, name, arguments):
         path = posixpath.join(computer.memory_path, filename)
         await computer.write(path, text.encode())
     write_note(root / "memory", filename, text)
+    await push(sessions.store, sessions.config, bot)
     return "Saved. The updated note informs the next run."

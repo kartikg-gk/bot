@@ -18,6 +18,7 @@ from delta_gateway.bots import MEMORY_MOUNT, bot_root, prepare, workspace
 from delta_gateway.computer import DockerComputer, LocalComputer, ManagedComputer
 from delta_gateway.embedded import EmbeddedClient
 from delta_gateway.errors import RequestRejected, WorkerLost
+from delta_gateway.file_tables import pull
 from delta_gateway.plugins import PLUGINS, resolved
 from delta_gateway.store import Conversation
 
@@ -101,6 +102,9 @@ class SessionManager:
         return tuple(names)
 
     async def signature(self, bot):
+        # Hosted: refresh the bot's note and skill folders from the tables first.
+        await pull(self.store, self.config, None)
+        await pull(self.store, self.config, bot)
         settings = await profile(self.store, bot)
         from delta_gateway.bot_skills import load_bot_skills
         from delta_gateway.skill_store import NOTES

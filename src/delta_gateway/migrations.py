@@ -3,7 +3,7 @@
 import sqlite3
 from functools import cache
 
-SCHEMA = 18
+SCHEMA = 19
 # Rows that a web request and the runner can both change. Updates go through
 # ``rows.update_versioned``, which only lands on the version it read.
 VERSIONED_TABLES = ("jobs", "web_runs", "approvals", "inbox", "delegations", "scheduler_leases")
@@ -156,6 +156,24 @@ def migrate(db, version):
                     not in {row[1] for row in db.execute(f"PRAGMA table_info({table})")}
                 )
                 + "PRAGMA user_version=18; COMMIT;"
+            )
+        except BaseException:
+            db.rollback()
+            raise
+
+    if version < 19:
+        # Notes and skill files for hosted bots, whose local folders do not last.
+        try:
+            db.executescript(
+                "BEGIN IMMEDIATE; "
+                "CREATE TABLE IF NOT EXISTS bot_memory(instance TEXT NOT NULL, bot TEXT NOT NULL, "
+                "file TEXT NOT NULL, content TEXT NOT NULL, updated REAL NOT NULL, "
+                "PRIMARY KEY(instance,bot,file)); "
+                "CREATE TABLE IF NOT EXISTS skill_files(instance TEXT NOT NULL, "
+                "scope TEXT NOT NULL, "
+                "skill TEXT NOT NULL, path TEXT NOT NULL, content TEXT NOT NULL, "
+                "revision TEXT NOT NULL, PRIMARY KEY(instance,scope,skill,path)); "
+                "PRAGMA user_version=19; COMMIT;"
             )
         except BaseException:
             db.rollback()

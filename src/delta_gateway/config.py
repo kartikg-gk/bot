@@ -73,6 +73,8 @@ class Config(BaseModel):
     daytona_snapshot: str | None = None
     daytona_archive_minutes: int = Field(default=60, ge=1)
     sandbox_network: str = Field(default="open", pattern=r"^(open|closed)$")
+    # Set by the hosted entry point from its environment; never read from a YAML file.
+    hosted: bool = False
     memory_enabled: bool = False
     memory_extract: bool = False
     memory_extractor: str = Field(default="mem0", pattern=r"^(mem0|delta)$")
@@ -109,6 +111,10 @@ class Config(BaseModel):
             raise ValueError("State, database and session paths must be absolute")
         if self.agent_dir and not self.agent_dir.is_absolute():
             raise ValueError("Agent directory must be absolute")
+        if self.hosted and self.executor != "daytona":
+            raise ValueError("Hosted mode needs the Daytona executor")
+        if self.hosted and self.memory_enabled:
+            raise ValueError("Hosted mode keeps notes only; turn off memory")
         if self.web_only and self.web_port is None:
             raise ValueError("Web-only mode needs a web port")
         if self.web_auth == "google" and (

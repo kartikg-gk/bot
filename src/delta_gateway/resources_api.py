@@ -5,6 +5,7 @@ from aiohttp import web
 from delta_gateway.bot_profiles import reserve
 from delta_gateway.bot_skills import load_bot_skills
 from delta_gateway.bots import bot_root
+from delta_gateway.file_tables import pull, push
 from delta_gateway.skill_store import NOTES, SkillStore, safe_file, text_file, write_note
 from delta_gateway.web import ResourceScope
 
@@ -31,7 +32,14 @@ class ResourcesAPI(ResourceScope):
     def root(self, bot):
         return bot_root(self.config, bot) / "skills" if bot else self.config.state / "skills"
 
-    def skills(self, bot):
+    async def current(self, bot):
+        # A hosted bot's folders are working copies of the tables; fill them before use.
+        await pull(self.store, self.config, None)
+        if bot:
+            await pull(self.store, self.config, bot)
+
+    async def skills(self, bot):
+        await self.current(bot)
         return load_bot_skills(self.config, self.root(bot) if bot else None)
 
     async def catalog(self, request):
@@ -45,13 +53,15 @@ class ResourcesAPI(ResourceScope):
                     disabled=s.disable_model_invocation,
                     managed=s.source.parent.parent == root and not s.source.parent.is_symlink(),
                 )
-                for s in self.skills(bot)
+                for s in await self.skills(bot)
             ]
         )
 
     async def read(self, request):
         bot = await self.bot(request)
-        skill = next((s for s in self.skills(bot) if s.name == request.match_info["name"]), None)
+        skill = next(
+            (s for s in await self.skills(bot) if s.name == request.match_info["name"]), None
+        )
         if skill is None:
             raise web.HTTPNotFound(text="Unknown skill")
         try:
@@ -68,12 +78,15 @@ class ResourcesAPI(ResourceScope):
             body = await request.json()
             if not isinstance(body, dict) or set(body) != {"name", "files"}:
                 raise ValueError("Supply a skill name and files")
+            await self.current(bot)
             if bot:
                 with reserve(self.sessions, bot.id):
                     SkillStore(self.root(bot)).write(body["name"], body["files"])
+                    await push(self.store, self.config, bot)
                     await self.sessions.restart_idle(bot.id)
             else:
                 SkillStore(self.root(None)).write(body["name"], body["files"])
+                await push(self.store, self.config, None)
         except (ValueError, OSError) as error:
             raise web.HTTPBadRequest(text=str(error)) from None
         except RuntimeError:
@@ -83,12 +96,15 @@ class ResourcesAPI(ResourceScope):
     async def remove(self, request):
         bot = await self.bot(request)
         try:
+            await self.current(bot)
             if bot:
                 with reserve(self.sessions, bot.id):
                     SkillStore(self.root(bot)).remove(request.match_info["name"])
+                    await push(self.store, self.config, bot)
                     await self.sessions.restart_idle(bot.id)
             else:
                 SkillStore(self.root(None)).remove(request.match_info["name"])
+                await push(self.store, self.config, None)
         except (ValueError, OSError) as error:
             raise web.HTTPBadRequest(text=str(error)) from None
         except RuntimeError:
@@ -98,6 +114,7 @@ class ResourcesAPI(ResourceScope):
     async def notes(self, request):
         bot = await self.bot(request)
         root = bot_root(self.config, bot) / "memory"
+        await self.current(bot)
         if request.method == "GET":
             try:
                 return web.json_response(
@@ -116,6 +133,7 @@ class ResourcesAPI(ResourceScope):
                 raise ValueError("Supply a note filename and text")
             with reserve(self.sessions, bot.id):
                 write_note(root, body["file"], body["text"])
+                await push(self.store, self.config, bot)
                 await self.sessions.restart_idle(bot.id)
         except (ValueError, OSError) as error:
             raise web.HTTPBadRequest(text=str(error)) from None
