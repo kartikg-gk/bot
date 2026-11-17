@@ -227,7 +227,7 @@ async def test_wispr_registration_browser_binding_rotation_and_local_disconnect(
     assert (await bob.get(callback, params=params)).status_code == 400
     assert (await alice.get(callback, params=params)).status_code == 302
     assert (await alice.get(callback, params=params)).status_code == 400
-    principal = server.google.identity(alice.cookies["delta_session"])
+    principal = await server.google.identity(alice.cookies["delta_session"])
     runtime = server.runtimes.get(principal)
     bot = await runtime.store.create_bot("Meeting reader", "Find meeting notes")
     grant = route + f"/bots/{bot.id}"
@@ -238,7 +238,7 @@ async def test_wispr_registration_browser_binding_rotation_and_local_disconnect(
     await asyncio.gather(*(runtime.team.call_plugin("wispr_list_tools", {}, bot) for _ in range(2)))
     assert calls.count("refresh_token") == 1
     assert calls.count("read") == 2
-    sealed = server.accounts.db.execute(
+    sealed = server.accounts.db.connection.execute(
         "SELECT sealed FROM credentials WHERE kind='app'"
     ).fetchone()[0]
     assert b"fresh-access" not in sealed and b"fresh-refresh" not in sealed

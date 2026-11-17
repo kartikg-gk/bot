@@ -5,214 +5,217 @@ import hashlib
 import json
 import os
 import secrets
-import sqlite3
 import time
 from pathlib import Path
 from uuid import uuid4
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
+from delta_gateway.database import SqliteDatabase
+
 SESSION_SECONDS = 12 * 60 * 60
 FLOW_SECONDS = 600
 VALIDATION_SECONDS = 300
 VALIDATION_LIMIT = 5
+
+SCHEMA = (
+    "CREATE TABLE IF NOT EXISTS accounts(id TEXT PRIMARY KEY, subject TEXT NOT NULL UNIQUE, "
+    "email TEXT NOT NULL, domain TEXT, provider TEXT, model TEXT)",
+    "CREATE TABLE IF NOT EXISTS flows(state BLOB PRIMARY KEY, browser BLOB NOT NULL, "
+    "verifier TEXT NOT NULL, nonce TEXT NOT NULL, expires REAL NOT NULL)",
+    "CREATE TABLE IF NOT EXISTS app_flows(account TEXT NOT NULL REFERENCES accounts(id), "
+    "app TEXT NOT NULL, session BLOB NOT NULL, state BLOB NOT NULL, verifier TEXT NOT NULL, "
+    "expires REAL NOT NULL, PRIMARY KEY(account,app,session))",
+    "CREATE TABLE IF NOT EXISTS sessions(token BLOB PRIMARY KEY, "
+    "account TEXT NOT NULL REFERENCES accounts(id), expires REAL NOT NULL)",
+    "CREATE TABLE IF NOT EXISTS credentials(account TEXT NOT NULL REFERENCES accounts(id), "
+    "kind TEXT NOT NULL, name TEXT NOT NULL, sealed BLOB NOT NULL, "
+    "PRIMARY KEY(account,kind,name))",
+    "CREATE TABLE IF NOT EXISTS attempts(account TEXT NOT NULL REFERENCES accounts(id), "
+    "attempted REAL NOT NULL)",
+    "CREATE INDEX IF NOT EXISTS attempts_account ON attempts(account,attempted)",
+)
 
 
 def digest(value):
     return hashlib.sha256(value.encode()).digest()
 
 
+def cipher_for(encoded_key):
+    try:
+        key = base64.b64decode(encoded_key, altchars=b"-_", validate=True)
+        if len(key) != 32:
+            raise ValueError
+    except (TypeError, ValueError):
+        raise ValueError("DELTA_GATEWAY_MASTER_KEY must encode 32 random bytes as base64") from None
+    return AESGCM(key)
+
+
 class AccountStore:
+    """Web accounts on a local file by default, or on any database interface via open()."""
+
     def __init__(self, path, realm, encoded_key):
-        try:
-            key = base64.b64decode(encoded_key, altchars=b"-_", validate=True)
-            if len(key) != 32:
-                raise ValueError
-        except (TypeError, ValueError):
-            raise ValueError(
-                "DELTA_GATEWAY_MASTER_KEY must encode 32 random bytes as base64"
-            ) from None
-        self.cipher, self.realm = AESGCM(key), realm
+        self.cipher, self.realm = cipher_for(encoded_key), realm
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
-        self.db = sqlite3.connect(path)
-        self.db.row_factory = sqlite3.Row
+        self.db = SqliteDatabase(path)
+        self.owns_db = True
         path.chmod(0o600)
-        self.db.executescript("""
-            PRAGMA foreign_keys=ON;
-            CREATE TABLE IF NOT EXISTS accounts(
-                id TEXT PRIMARY KEY, subject TEXT NOT NULL UNIQUE, email TEXT NOT NULL,
-                domain TEXT, provider TEXT, model TEXT);
-            CREATE TABLE IF NOT EXISTS flows(
-                state BLOB PRIMARY KEY, browser BLOB NOT NULL, verifier TEXT NOT NULL,
-                nonce TEXT NOT NULL, expires REAL NOT NULL);
-            CREATE TABLE IF NOT EXISTS app_flows(
-                account TEXT NOT NULL REFERENCES accounts(id), app TEXT NOT NULL,
-                session BLOB NOT NULL, state BLOB NOT NULL, verifier TEXT NOT NULL,
-                expires REAL NOT NULL, PRIMARY KEY(account,app,session));
-            CREATE TABLE IF NOT EXISTS sessions(
-                token BLOB PRIMARY KEY, account TEXT NOT NULL REFERENCES accounts(id),
-                expires REAL NOT NULL);
-            CREATE TABLE IF NOT EXISTS credentials(
-                account TEXT NOT NULL REFERENCES accounts(id), kind TEXT NOT NULL,
-                name TEXT NOT NULL, sealed BLOB NOT NULL, PRIMARY KEY(account,kind,name));
-            CREATE TABLE IF NOT EXISTS attempts(
-                account TEXT NOT NULL REFERENCES accounts(id), attempted REAL NOT NULL);
-            CREATE INDEX IF NOT EXISTS attempts_account ON attempts(account,attempted);
-        """)
+        with self.db.lock:
+            self.db.connection.execute("PRAGMA foreign_keys=ON")
+            for statement in SCHEMA:
+                self.db.connection.execute(statement)
+
+    @classmethod
+    async def open(cls, database, realm, encoded_key):
+        self = cls.__new__(cls)
+        self.cipher, self.realm = cipher_for(encoded_key), realm
+        self.db, self.owns_db = database, False
+        for statement in SCHEMA:
+            await database.run(statement)
+        return self
 
     def close(self):
-        self.db.close()
+        if self.owns_db:
+            self.db.close_now()
 
-    def start_flow(self, state, browser, verifier, nonce):
+    async def start_flow(self, state, browser, verifier, nonce):
         now = time.time()
-        with self.db:
-            self.db.execute(
-                "DELETE FROM flows WHERE expires<=? OR browser=?", (now, digest(browser))
-            )
-            if self.db.execute("SELECT count(*) FROM flows").fetchone()[0] >= 1024:
-                raise ValueError("Sign-in is busy. Try again shortly.")
-            self.db.execute(
-                "INSERT INTO flows VALUES(?,?,?,?,?)",
-                (digest(state), digest(browser), verifier, nonce, now + FLOW_SECONDS),
-            )
+        await self.db.run("DELETE FROM flows WHERE expires<=? OR browser=?", (now, digest(browser)))
+        # The size check and the insert are one statement, so the cap holds under load.
+        if not await self.db.run(
+            "INSERT INTO flows SELECT ?,?,?,?,? WHERE (SELECT count(*) FROM flows) < 1024",
+            (digest(state), digest(browser), verifier, nonce, now + FLOW_SECONDS),
+        ):
+            raise ValueError("Sign-in is busy. Try again shortly.")
 
-    def consume_flow(self, state, browser):
-        with self.db:
-            return self.db.execute(
-                "DELETE FROM flows WHERE state=? AND browser=? AND expires>? "
-                "RETURNING verifier,nonce",
-                (digest(state), digest(browser), time.time()),
-            ).fetchone()
+    async def consume_flow(self, state, browser):
+        rows = await self.db.query(
+            "DELETE FROM flows WHERE state=? AND browser=? AND expires>? RETURNING verifier,nonce",
+            (digest(state), digest(browser), time.time()),
+        )
+        return rows[0] if rows else None
 
-    def sign_in(self, subject, email, domain):
+    async def sign_in(self, subject, email, domain):
         token = secrets.token_urlsafe(32)
-        with self.db:
-            self.db.execute("DELETE FROM sessions WHERE expires<=?", (time.time(),))
-            account = self.db.execute(
-                "INSERT INTO accounts(id,subject,email,domain) VALUES(?,?,?,?) "
-                "ON CONFLICT(subject) DO UPDATE SET email=excluded.email,domain=excluded.domain "
-                "RETURNING id",
-                (uuid4().hex, subject, email, domain),
-            ).fetchone()[0]
-            self.db.execute(
-                "INSERT INTO sessions VALUES(?,?,?)",
-                (digest(token), account, time.time() + SESSION_SECONDS),
-            )
+        await self.db.run("DELETE FROM sessions WHERE expires<=?", (time.time(),))
+        rows = await self.db.query(
+            "INSERT INTO accounts(id,subject,email,domain) VALUES(?,?,?,?) "
+            "ON CONFLICT(subject) DO UPDATE SET email=excluded.email,domain=excluded.domain "
+            "RETURNING id",
+            (uuid4().hex, subject, email, domain),
+        )
+        await self.db.run(
+            "INSERT INTO sessions VALUES(?,?,?)",
+            (digest(token), rows[0]["id"], time.time() + SESSION_SECONDS),
+        )
         return token
 
-    def session(self, token):
+    async def session(self, token):
         if not token or len(token) != 43:
             return None
-        return self.db.execute(
+        rows = await self.db.query(
             "SELECT a.* FROM accounts a JOIN sessions s ON s.account=a.id "
             "WHERE s.token=? AND s.expires>?",
             (digest(token), time.time()),
-        ).fetchone()
+        )
+        return rows[0] if rows else None
 
-    def sign_out(self, token):
+    async def sign_out(self, token):
         if token:
-            with self.db:
-                self.db.execute("DELETE FROM sessions WHERE token=?", (digest(token),))
+            await self.db.run("DELETE FROM sessions WHERE token=?", (digest(token),))
 
-    def account(self, account):
-        return self.db.execute("SELECT * FROM accounts WHERE id=?", (account,)).fetchone()
+    async def account(self, account):
+        rows = await self.db.query("SELECT * FROM accounts WHERE id=?", (account,))
+        return rows[0] if rows else None
 
-    def all_accounts(self):
-        return self.db.execute("SELECT * FROM accounts").fetchall()
+    async def all_accounts(self):
+        return await self.db.query("SELECT * FROM accounts")
 
-    def start_app_flow(self, account, app, session, state, verifier):
+    async def start_app_flow(self, account, app, session, state, verifier):
         now = time.time()
-        with self.db:
-            self.db.execute("DELETE FROM app_flows WHERE expires<=?", (now,))
-            self.db.execute(
-                "INSERT OR REPLACE INTO app_flows VALUES(?,?,?,?,?,?)",
-                (account, app, digest(session), digest(state), verifier, now + FLOW_SECONDS),
-            )
+        await self.db.run("DELETE FROM app_flows WHERE expires<=?", (now,))
+        await self.db.run(
+            "INSERT OR REPLACE INTO app_flows VALUES(?,?,?,?,?,?)",
+            (account, app, digest(session), digest(state), verifier, now + FLOW_SECONDS),
+        )
 
-    def consume_app_flow(self, account, app, session, state):
-        with self.db:
-            row = self.db.execute(
-                "DELETE FROM app_flows WHERE account=? AND app=? AND session=? AND state=? "
-                "AND expires>? RETURNING verifier",
-                (account, app, digest(session), digest(state), time.time()),
-            ).fetchone()
-            return row[0] if row else None
+    async def consume_app_flow(self, account, app, session, state):
+        rows = await self.db.query(
+            "DELETE FROM app_flows WHERE account=? AND app=? AND session=? AND state=? "
+            "AND expires>? RETURNING verifier",
+            (account, app, digest(session), digest(state), time.time()),
+        )
+        return rows[0]["verifier"] if rows else None
 
-    def delete_credential(self, account, kind, name):
-        self.db.execute(
+    async def delete_credential(self, account, kind, name):
+        await self.db.run(
             "DELETE FROM credentials WHERE account=? AND kind=? AND name=?", (account, kind, name)
         )
 
-    def delete_app_token(self, account, app):
-        self.delete_credential(account, "app", app)
+    async def delete_app_token(self, account, app):
+        await self.delete_credential(account, "app", app)
 
-    def remove_app(self, account, app):
-        with self.db:
-            self.delete_app_token(account, app)
-            self.db.execute("DELETE FROM app_flows WHERE account=? AND app=?", (account, app))
+    async def remove_app(self, account, app):
+        await self.delete_app_token(account, app)
+        await self.db.run("DELETE FROM app_flows WHERE account=? AND app=?", (account, app))
 
     def associated_data(self, account, kind, name):
         return json.dumps([self.realm, account, kind, name]).encode()
 
-    def credential(self, account, kind, name):
-        row = self.db.execute(
+    async def credential(self, account, kind, name):
+        rows = await self.db.query(
             "SELECT sealed FROM credentials WHERE account=? AND kind=? AND name=?",
             (account, kind, name),
-        ).fetchone()
-        if row is None:
+        )
+        if not rows:
             return None
-        sealed = row[0]
+        sealed = rows[0]["sealed"]
         return self.cipher.decrypt(
             sealed[:12], sealed[12:], self.associated_data(account, kind, name)
         ).decode()
 
-    def names(self, account, kind):
-        return [
-            row[0]
-            for row in self.db.execute(
-                "SELECT name FROM credentials WHERE account=? AND kind=? ORDER BY name",
-                (account, kind),
-            )
-        ]
+    async def names(self, account, kind):
+        rows = await self.db.query(
+            "SELECT name FROM credentials WHERE account=? AND kind=? ORDER BY name",
+            (account, kind),
+        )
+        return [row["name"] for row in rows]
 
-    def put_credential(self, account, kind, name, value):
+    async def put_credential(self, account, kind, name, value):
         nonce = os.urandom(12)
         sealed = nonce + self.cipher.encrypt(
             nonce, value.encode(), self.associated_data(account, kind, name)
         )
-        self.db.execute(
+        await self.db.run(
             "INSERT OR REPLACE INTO credentials VALUES(?,?,?,?)", (account, kind, name, sealed)
         )
 
-    def set_model(self, account, provider, model, key=None):
-        with self.db:
-            if key is not None:
-                self.put_credential(account, "model", provider, key)
-            self.db.execute(
-                "UPDATE accounts SET provider=?,model=? WHERE id=?", (provider, model, account)
-            )
+    async def set_model(self, account, provider, model, key=None):
+        if key is not None:
+            await self.put_credential(account, "model", provider, key)
+        await self.db.run(
+            "UPDATE accounts SET provider=?,model=? WHERE id=?", (provider, model, account)
+        )
 
-    def remove_model_key(self, account, provider):
-        with self.db:
-            self.db.execute(
-                "DELETE FROM credentials WHERE account=? AND kind='model' AND name=?",
-                (account, provider),
-            )
-            self.db.execute(
-                "UPDATE accounts SET provider=NULL,model=NULL WHERE id=? AND provider=?",
-                (account, provider),
-            )
+    async def remove_model_key(self, account, provider):
+        await self.db.run(
+            "DELETE FROM credentials WHERE account=? AND kind='model' AND name=?",
+            (account, provider),
+        )
+        await self.db.run(
+            "UPDATE accounts SET provider=NULL,model=NULL WHERE id=? AND provider=?",
+            (account, provider),
+        )
 
-    def validation_attempt(self, account, now=None):
+    async def validation_attempt(self, account, now=None):
         now = time.time() if now is None else now
-        with self.db:
-            self.db.execute("BEGIN IMMEDIATE")
-            self.db.execute("DELETE FROM attempts WHERE attempted<=?", (now - VALIDATION_SECONDS,))
-            count = self.db.execute(
-                "SELECT count(*) FROM attempts WHERE account=?", (account,)
-            ).fetchone()[0]
-            if count >= VALIDATION_LIMIT:
-                return False
-            self.db.execute("INSERT INTO attempts VALUES(?,?)", (account, now))
-        return True
+        await self.db.run("DELETE FROM attempts WHERE attempted<=?", (now - VALIDATION_SECONDS,))
+        # The count and the insert are one statement, so parallel attempts cannot pass the cap.
+        return bool(
+            await self.db.run(
+                "INSERT INTO attempts SELECT ?,? WHERE (SELECT count(*) FROM attempts "
+                "WHERE account=?) < CAST(? AS INTEGER)",
+                (account, now, account, VALIDATION_LIMIT),
+            )
+        )

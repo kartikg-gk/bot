@@ -137,7 +137,7 @@ async def test_bland_key_grants_call_tool_and_account_result_view(accounts):
     lookup = bland_route + "/calls/" + CALL
     assert (await bob.get(lookup)).status_code == 409
     assert (await alice.get(lookup + "?offset=-1")).status_code == 400
-    principal = server.google.identity(alice.cookies["delta_session"])
+    principal = await server.google.identity(alice.cookies["delta_session"])
     runtime = server.runtimes.get(principal)
     bot = await runtime.store.create_bot("Phone assistant", "Call a number only with approval")
     with pytest.raises(ValueError, match="not enabled"):

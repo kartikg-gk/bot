@@ -42,7 +42,7 @@ async def test_search_falls_back_without_forwarding_primary_key(monkeypatch, fai
 
     runner = PluginRunner(transport=httpx.MockTransport(respond))
     try:
-        assert runner.configured("web_search")
+        assert await runner.configured("web_search")
         result = await runner.run("web_search", {"query": "search term"})
     finally:
         await runner.http.aclose()

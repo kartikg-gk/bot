@@ -1,6 +1,7 @@
 """Connected services. Credentials stay on the gateway; bots only see tool results."""
 
 import base64
+import inspect
 import json
 import os
 import re
@@ -428,6 +429,11 @@ def gmail_raw(arguments):
     return base64.urlsafe_b64encode(message.as_bytes()).decode()
 
 
+async def resolved(value):
+    """Await *value* if it is awaitable; callbacks here may be plain or async."""
+    return await value if inspect.isawaitable(value) else value
+
+
 class PluginRunner:
     def __init__(
         self,
@@ -447,8 +453,10 @@ class PluginRunner:
         self.documents = Documents()
         self.telegram_send = telegram_send
 
-    def configured(self, name):
-        return self.available(name) if self.available is not None else PLUGINS[name].configured()
+    async def configured(self, name):
+        if self.available is None:
+            return PLUGINS[name].configured()
+        return await resolved(self.available(name))
 
     async def run(self, name, arguments, *, bot_name=None):
         owner = TOOL_OWNERS.get(name)

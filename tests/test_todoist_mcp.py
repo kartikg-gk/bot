@@ -224,7 +224,7 @@ async def test_todoist_oauth_binds_resource_rotates_and_revokes(accounts, monkey
     assert (await bob.get(callback, params=params)).status_code == 400
     assert (await alice.get(callback, params=params)).status_code == 302
     assert (await alice.get(callback, params=params)).status_code == 400
-    account = server.google.identity(alice.cookies["delta_session"])
+    account = await server.google.identity(alice.cookies["delta_session"])
     runtime = server.runtimes.get(account)
     bot = await runtime.store.create_bot("Todoist reader", "Find tasks")
     grant = route + f"/bots/{bot.id}"
@@ -234,7 +234,7 @@ async def test_todoist_oauth_binds_resource_rotates_and_revokes(accounts, monkey
         *(runtime.team.call_plugin("todoist_list_tools", {}, bot) for _ in range(2))
     )
     assert calls == ["authorization_code", "refresh_token", "tool", "tool"]
-    sealed = server.accounts.db.execute(
+    sealed = server.accounts.db.connection.execute(
         "SELECT sealed FROM credentials WHERE kind='app'"
     ).fetchone()[0]
     assert b"new-access" not in sealed and b"new-refresh" not in sealed

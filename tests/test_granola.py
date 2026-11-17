@@ -82,11 +82,11 @@ async def test_granola_saved_key_is_private_and_reads_notes_and_transcripts(acco
     assert next(app for app in alice_apps if app["id"] == "granola")["connected"]
     assert not next(app for app in bob_apps if app["id"] == "granola")["saved"]
     assert KEY not in json.dumps(alice_apps)
-    sealed = server.accounts.db.execute(
+    sealed = server.accounts.db.connection.execute(
         "SELECT sealed FROM credentials WHERE kind='app'"
     ).fetchone()[0]
     assert KEY.encode() not in sealed
-    principal = server.google.identity(alice.cookies["delta_session"])
+    principal = await server.google.identity(alice.cookies["delta_session"])
     runtime = server.runtimes.get(principal)
     bot = await runtime.store.create_bot("Note reader", "Read meeting notes")
     grant = route + f"/bots/{bot.id}"

@@ -176,8 +176,12 @@ class EmbeddedClient:
         from delta_app.rpc import RpcServer
         from delta_app.session_lock import SessionLease
 
+        from delta_gateway.plugins import resolved
+
         try:
-            provider, name, model = (self.make_provider or default_provider)(self.config)
+            provider, name, model = await resolved(
+                (self.make_provider or default_provider)(self.config)
+            )
             if self.budget is not None:
                 provider = self.budget.wrap(provider, name)
             available = await self.plugin_definitions() if self.plugin_definitions else {}

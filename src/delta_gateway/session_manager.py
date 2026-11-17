@@ -18,7 +18,7 @@ from delta_gateway.bots import MEMORY_MOUNT, bot_root, prepare, workspace
 from delta_gateway.computer import DockerComputer, LocalComputer, ManagedComputer
 from delta_gateway.embedded import EmbeddedClient
 from delta_gateway.errors import RequestRejected, WorkerLost
-from delta_gateway.plugins import PLUGINS
+from delta_gateway.plugins import PLUGINS, resolved
 from delta_gateway.store import Conversation
 
 DURABLE_REVIEW = ContextVar("durable_review", default=True)
@@ -94,11 +94,11 @@ class SessionManager:
         return computer
 
     async def enabled_plugins(self, bot):
-        return tuple(
-            name
-            for name in await self.store.plugins_for(bot.id)
-            if name in PLUGINS and self.plugin_available(name)
-        )
+        names = []
+        for name in await self.store.plugins_for(bot.id):
+            if name in PLUGINS and await resolved(self.plugin_available(name)):
+                names.append(name)
+        return tuple(names)
 
     async def signature(self, bot):
         settings = await profile(self.store, bot)
@@ -116,7 +116,7 @@ class SessionManager:
             (s.name, s.body, s.description, s.disable_model_invocation, str(s.source))
             for s in load_bot_skills(self.config, root / "skills")
         )
-        revision = getattr(self.factory, "revision", lambda: None)()
+        revision = await resolved(getattr(self.factory, "revision", lambda: None)())
         return (
             bot.role,
             bot.instructions,

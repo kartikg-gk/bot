@@ -255,7 +255,7 @@ class WebServer:
                 ):
                     return web.json_response(dict(error="Untrusted host or origin"), status=403)
                 token = request.cookies.get(SESSION_COOKIE)
-                account = self.google.identity(token)
+                account = await self.google.identity(token)
                 if account is not None:
                     request[ACCOUNT_REQUEST] = account
                 if request.path.startswith("/api/"):
@@ -303,7 +303,7 @@ class WebServer:
         await site.start()
         self.port = site._server.sockets[0].getsockname()[1]
         if self.runtimes:
-            self.runtimes.start()
+            await self.runtimes.start()
 
     async def close(self):
         if self.runner:
@@ -339,10 +339,10 @@ class WebServer:
 
         return request.get(ACCOUNT_REQUEST)
 
-    def account_from_cookie(self, request):
+    async def account_from_cookie(self, request):
         from delta_gateway.google_oidc import SESSION_COOKIE
 
-        return self.google.identity(request.cookies.get(SESSION_COOKIE))
+        return await self.google.identity(request.cookies.get(SESSION_COOKIE))
 
     async def auth_session(self, request):
         from aiohttp import web
@@ -444,13 +444,15 @@ class WebServer:
             while True:
                 try:
                     record = await asyncio.wait_for(queue.get(), 15)
-                    if record is None or (self.google and not self.account_from_cookie(request)):
+                    if record is None or (
+                        self.google and not await self.account_from_cookie(request)
+                    ):
                         break
                     if record["type"] in {"message", "edit"}:
                         record = reply_markup(record)
                     await response.write(f"data: {json.dumps(record)}\n\n".encode())
                 except TimeoutError:
-                    if self.google and not self.account_from_cookie(request):
+                    if self.google and not await self.account_from_cookie(request):
                         break
                     await response.write(b": keep-alive\n\n")
         except (ConnectionResetError, asyncio.CancelledError):

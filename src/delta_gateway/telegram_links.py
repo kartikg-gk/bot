@@ -68,7 +68,7 @@ class TelegramLinks:
                     owner = pending.get(code)
                     current = self.pending.get(owner)
                     if current is not None and current[0] == code and current[1] > time.monotonic():
-                        save(owner, chat["id"])
+                        await save(owner, chat["id"])
                         self.forget(owner)
                 self.offset = update_id + 1
 

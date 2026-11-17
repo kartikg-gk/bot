@@ -17,25 +17,25 @@ class AccountProvider:
     def __init__(self, store, account):
         self.store, self.account = store, account
 
-    def revision(self):
-        row = self.store.db.execute(
+    async def revision(self):
+        rows = await self.store.db.query(
             "SELECT a.provider,a.model,c.sealed FROM accounts a LEFT JOIN credentials c "
             "ON c.account=a.id AND c.kind='model' AND c.name=a.provider WHERE a.id=?",
             (self.account,),
-        ).fetchone()
-        return tuple(row)
+        )
+        return tuple(rows[0].values())
 
-    def __call__(self, config):
+    async def __call__(self, config):
         from delta_model.claude import AnthropicProvider
         from delta_model.oai_compatible import OpenAIProvider
         from delta_model.settings import AnthropicProfile, Credential, OpenAIProfile
 
-        row = self.store.account(self.account)
+        row = await self.store.account(self.account)
         name, model = row["provider"], row["model"]
         if name not in PROVIDERS or not model:
             raise RuntimeError("Choose a model and save an API key in Account settings")
         try:
-            key = self.store.credential(self.account, "model", name)
+            key = await self.store.credential(self.account, "model", name)
         except InvalidTag:
             raise RuntimeError(
                 "Saved key could not be decrypted with the gateway master key"
@@ -56,19 +56,19 @@ class AccountModels:
         self.store = server.accounts
         self.http = httpx.AsyncClient(transport=transport, timeout=10, trust_env=False)
 
-    def settings(self, account):
-        row = self.store.account(account)
+    async def settings(self, account):
+        row = await self.store.account(account)
         return web.json_response(
             {
                 "provider": row["provider"],
                 "model": row["model"],
-                "keys": self.store.names(account, "model"),
+                "keys": await self.store.names(account, "model"),
             },
             headers={"Cache-Control": "no-store"},
         )
 
     async def read(self, request):
-        return self.settings(self.server.account(request)["id"])
+        return await self.settings(self.server.account(request)["id"])
 
     async def validate(self, provider, key):
         base, path = PROVIDERS[provider]
@@ -112,19 +112,19 @@ class AccountModels:
             )
         self.require_idle()
         if key is not None:
-            if not self.store.validation_attempt(account):
+            if not await self.store.validation_attempt(account):
                 raise web.HTTPTooManyRequests(
                     text="Too many key checks. Try again in five minutes."
                 )
             await self.validate(provider, key)
             # A session may have signed out while the provider was checking the key.
-            if self.server.account_from_cookie(request) is None:
+            if (await self.server.account_from_cookie(request)) is None:
                 raise web.HTTPUnauthorized(text="Sign in again")
-        elif provider not in self.store.names(account, "model"):
+        elif provider not in await self.store.names(account, "model"):
             raise web.HTTPBadRequest(text="Save a key for this provider first")
         self.require_idle()
-        self.store.set_model(account, provider, model, key)
-        return self.settings(account)
+        await self.store.set_model(account, provider, model, key)
+        return await self.settings(account)
 
     async def remove(self, request):
         account = self.server.account(request)["id"]
@@ -132,5 +132,5 @@ class AccountModels:
         if provider not in PROVIDERS:
             raise web.HTTPNotFound(text="Unknown provider")
         self.require_idle()
-        self.store.remove_model_key(account, provider)
-        return self.settings(account)
+        await self.store.remove_model_key(account, provider)
+        return await self.settings(account)

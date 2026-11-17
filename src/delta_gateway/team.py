@@ -183,7 +183,7 @@ class Team:
         plugin = TOOL_OWNERS[name]
         if not bot or plugin not in await self.store.plugins_for(bot.id):
             raise ValueError(f"{plugin} is not enabled for this bot.")
-        if not self.plugins.configured(plugin):
+        if not await self.plugins.configured(plugin):
             raise ValueError(f"{plugin} is not set up on the gateway.")
         try:
             if plugin == "telegram":

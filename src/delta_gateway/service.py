@@ -976,7 +976,7 @@ class Service:
                     for b in await self.store.bots()
                     if name in await self.store.plugins_for(b.id)
                 ]
-                state = "ready" if self.team.plugins.configured(name) else "not set up"
+                state = "ready" if await self.team.plugins.configured(name) else "not set up"
                 lines.append(f"{name} ({state}): {', '.join(users) or 'no bots'}")
             return "\n".join(lines)
         action, name, target = (argument.split(maxsplit=2) + ["", "", ""])[:3]
@@ -986,7 +986,7 @@ class Service:
         bot = await self.store.find_bot(target) if target else await self.store.bot(current.bot)
         if not bot:
             raise ValueError("No bot with that name. Use /bot to list them.")
-        if action == "on" and not self.team.plugins.configured(name):
+        if action == "on" and not await self.team.plugins.configured(name):
             raise ValueError(f"{name} is not set up on the gateway.")
         await self.store.set_plugin(bot.id, name, action == "on")
         await self.sessions.restart_idle()

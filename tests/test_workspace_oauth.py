@@ -93,7 +93,7 @@ async def test_workspace_oauth_is_private_rotates_on_401_and_revokes(accounts, m
     assert (await bob.get(callback, params=params)).status_code == 400
     assert (await alice.get(callback, params=params)).status_code == 302
     assert (await alice.get(callback, params=params)).status_code == 400
-    principal = server.google.identity(alice.cookies["delta_session"])
+    principal = await server.google.identity(alice.cookies["delta_session"])
     runtime = server.runtimes.get(principal)
     bot = await runtime.store.create_bot("Workspace", "Use reviewed actions")
     grant = route + f"/bots/{bot.id}"
@@ -104,7 +104,7 @@ async def test_workspace_oauth_is_private_rotates_on_401_and_revokes(accounts, m
     assert (await alice.put(grant, json={"enabled": True})).status_code == 200
     await asyncio.gather(*(runtime.team.call_plugin(tool, {}, bot) for _ in range(3)))
     assert calls.count("refresh_token") == 1
-    sealed = server.accounts.db.execute(
+    sealed = server.accounts.db.connection.execute(
         "SELECT sealed FROM credentials WHERE kind='app'"
     ).fetchone()[0]
     assert b"fresh-access" not in sealed and b"fresh-refresh" not in sealed

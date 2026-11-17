@@ -36,7 +36,10 @@ class FakeD1:
             )
         result = {
             "success": True,
-            "results": [dict(row) for row in rows],
+            "results": [
+                {k: list(v) if isinstance(v, bytes) else v for k, v in dict(row).items()}
+                for row in rows
+            ],
             "meta": {"changes": changes},
         }
         return httpx.Response(200, json={"success": True, "errors": [], "result": [result]})

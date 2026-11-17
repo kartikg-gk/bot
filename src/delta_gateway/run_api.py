@@ -113,7 +113,7 @@ class RunAPI(ResourceScope):
         try:
             await response.prepare(request)
             while not journal.closed:
-                if self.server.google and not self.server.account_from_cookie(request):
+                if self.server.google and not (await self.server.account_from_cookie(request)):
                     break
                 event.clear()
                 result = journal.get(run, self.server.actor)
@@ -122,7 +122,7 @@ class RunAPI(ResourceScope):
                     gap = json.dumps({"type": "replay_gap", "run": run, "next": rows[0][0]})
                     await response.write(f"event: replay_gap\ndata: {gap}\n\n".encode())
                 for seq, kind, data in rows:
-                    if self.server.google and not self.server.account_from_cookie(request):
+                    if self.server.google and not (await self.server.account_from_cookie(request)):
                         return response
                     payload = json.dumps({"type": kind, "run": run, **data}, ensure_ascii=False)
                     await response.write(f"id: {seq}\nevent: {kind}\ndata: {payload}\n\n".encode())

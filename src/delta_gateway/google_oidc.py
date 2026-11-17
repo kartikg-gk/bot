@@ -77,8 +77,8 @@ class GoogleLogin:
         origin = request.headers.get("Origin")
         return origin == self.origin or (origin is None and request.method in {"GET", "HEAD"})
 
-    def identity(self, token):
-        account = self.store.session(token)
+    async def identity(self, token):
+        account = await self.store.session(token)
         if account is not None and self.permitted(account["email"], account["domain"]):
             return account
         return None
@@ -100,7 +100,7 @@ class GoogleLogin:
         if len(browser) != 43:
             browser = secrets.token_urlsafe(32)
         try:
-            self.store.start_flow(state, browser, verifier, nonce)
+            await self.store.start_flow(state, browser, verifier, nonce)
         except ValueError as exc:
             raise web.HTTPTooManyRequests(text=str(exc)) from None
         challenge = base64.urlsafe_b64encode(digest(verifier)).decode().rstrip("=")
@@ -153,7 +153,11 @@ class GoogleLogin:
     async def callback(self, request):
         state, code = request.query.get("state", ""), request.query.get("code", "")
         browser = request.cookies.get(LOGIN_COOKIE, "")
-        flow = self.store.consume_flow(state, browser) if len(state) == len(browser) == 43 else None
+        flow = (
+            await self.store.consume_flow(state, browser)
+            if len(state) == len(browser) == 43
+            else None
+        )
         if flow is None or not code or len(code) > 4096:
             raise web.HTTPBadRequest(text="Sign-in expired or was declined. Start again.")
         try:
@@ -183,8 +187,8 @@ class GoogleLogin:
             or not self.permitted(email, domain)
         ):
             raise web.HTTPForbidden(text="This Google account is not allowed")
-        self.store.sign_out(request.cookies.get(SESSION_COOKIE))
-        token = self.store.sign_in(subject, email, domain)
+        await self.store.sign_out(request.cookies.get(SESSION_COOKIE))
+        token = await self.store.sign_in(subject, email, domain)
         response = web.HTTPFound("/")
         response.headers["Cache-Control"] = "no-store"
         response.del_cookie(LOGIN_COOKIE, path="/")
@@ -192,7 +196,7 @@ class GoogleLogin:
         raise response
 
     async def logout(self, request):
-        self.store.sign_out(request.cookies.get(SESSION_COOKIE))
+        await self.store.sign_out(request.cookies.get(SESSION_COOKIE))
         response = web.json_response({"signedOut": True}, headers={"Cache-Control": "no-store"})
         response.del_cookie(SESSION_COOKIE, path="/")
         return response

@@ -43,9 +43,13 @@ class Database(Protocol):
 
 
 def inline_nulls(sql, params):
-    """Replace each ``?`` whose parameter is None with NULL, skipping quoted text."""
+    """Write None as NULL and bytes as X'..' into the statement, skipping quoted text.
+
+    D1's HTTP API binds text only, so these two kinds of value are written as literals.
+    Both backends do it, so local and hosted runs execute the same SQL.
+    """
     params = list(params)
-    if all(value is not None for value in params):
+    if all(value is not None and not isinstance(value, bytes) for value in params):
         return sql, params
     out, kept, index, quote = [], [], 0, None
     for char in sql:
@@ -58,6 +62,9 @@ def inline_nulls(sql, params):
             index += 1
             if value is None:
                 out.append("NULL")
+                continue
+            if isinstance(value, bytes):
+                out.append(f"X'{value.hex()}'")
                 continue
             kept.append(value)
         out.append(char)
@@ -172,7 +179,12 @@ class D1Database:
 
     async def query(self, sql, params=()):
         results = await self._execute(sql, params)
-        return [row for item in results for row in item.get("results") or []]
+        # D1 returns a BLOB as a list of byte values.
+        return [
+            {key: bytes(value) if isinstance(value, list) else value for key, value in row.items()}
+            for item in results
+            for row in item.get("results") or []
+        ]
 
     async def run(self, sql, params=()):
         results = await self._execute(sql, params)

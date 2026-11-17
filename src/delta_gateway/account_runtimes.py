@@ -47,9 +47,9 @@ class AccountRuntimes:
         self.services[identity] = service
         return service
 
-    def start(self):
+    async def start(self):
         # Reopen existing accounts so persisted jobs can run before anyone signs in again.
-        for account in self.accounts.all_accounts():
+        for account in await self.accounts.all_accounts():
             if self.login.permitted(account["email"], account["domain"]):
                 self.get(account)
         self.runner = asyncio.create_task(self.tick())

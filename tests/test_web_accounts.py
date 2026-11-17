@@ -240,8 +240,8 @@ async def test_accounts_separate_bots_chats_jobs_and_event_streams(accounts):
         )
     ).status_code == 201
     assert (await bob.get("/api/jobs")).json()["jobs"] == []
-    alice_service = server.runtimes.get(server.google.identity(alice.cookies[SESSION_COOKIE]))
-    bob_service = server.runtimes.get(server.google.identity(bob.cookies[SESSION_COOKIE]))
+    alice_service = server.runtimes.get(await server.google.identity(alice.cookies[SESSION_COOKIE]))
+    bob_service = server.runtimes.get(await server.google.identity(bob.cookies[SESSION_COOKIE]))
     assert alice_service.config.project != bob_service.config.project
     async with alice.stream("GET", "/api/stream") as stream:
         lines = stream.aiter_lines()
@@ -270,23 +270,23 @@ async def test_key_validation_is_rate_limited_and_ciphertext_is_account_bound(ac
     result = await alice.put(path, json=settings)
     assert result.status_code == 200 and settings["key"] not in result.text
     assert (await bob.get(path)).json() == {"provider": None, "model": None, "keys": []}
-    owner = server.google.identity(alice.cookies[SESSION_COOKIE])["id"]
-    other = server.google.identity(bob.cookies[SESSION_COOKIE])["id"]
-    sealed = server.accounts.db.execute("SELECT sealed FROM credentials").fetchone()[0]
+    owner = (await server.google.identity(alice.cookies[SESSION_COOKIE]))["id"]
+    other = (await server.google.identity(bob.cookies[SESSION_COOKIE]))["id"]
+    sealed = server.accounts.db.connection.execute("SELECT sealed FROM credentials").fetchone()[0]
     assert settings["key"].encode() not in sealed
     factory = AccountProvider(server.accounts, owner)
-    provider, name, model = factory(None)
+    provider, name, model = await factory(None)
     try:
         assert name == "openai" and model == "fixture"
         assert provider._profile.credential.api_key == settings["key"]
     finally:
         await provider.close()
-    with server.accounts.db:
-        server.accounts.db.execute(
+    with server.accounts.db.connection:
+        server.accounts.db.connection.execute(
             "INSERT INTO credentials VALUES(?,?,?,?)", (other, "model", "openai", sealed)
         )
     with pytest.raises(InvalidTag):
-        server.accounts.credential(other, "model", "openai")
+        await server.accounts.credential(other, "model", "openai")
     for _ in range(4):
         assert (await alice.put(path, json={**settings, "key": "invalid"})).status_code == 400
     assert (await alice.put(path, json=settings)).status_code == 429
@@ -298,7 +298,7 @@ async def test_signout_ends_an_existing_event_stream(accounts):
     server, browser, begin, _ = accounts
     client = browser()
     await login(client, begin, "alice", "alice@example.test")
-    row = server.google.identity(client.cookies[SESSION_COOKIE])
+    row = await server.google.identity(client.cookies[SESSION_COOKIE])
     channel = server.runtimes.get(row).telegram
     async with client.stream("GET", "/api/stream") as stream:
         lines = stream.aiter_lines()
@@ -337,8 +337,8 @@ async def test_validation_and_runtime_use_the_selected_provider(accounts, name, 
     )
     assert saved.status_code == 200
     assert checks == [(endpoint, "test-provider-key")]
-    user = server.google.identity(client.cookies[SESSION_COOKIE])
-    provider, selected, model = AccountProvider(server.accounts, user["id"])(None)
+    user = await server.google.identity(client.cookies[SESSION_COOKIE])
+    provider, selected, model = await AccountProvider(server.accounts, user["id"])(None)
     try:
         assert (selected, model) == (name, "test-model")
         assert provider._profile.credential.base_url == base
@@ -458,7 +458,7 @@ async def test_app_connection_is_private_refreshes_and_revokes(accounts, monkeyp
     assert result.headers["location"] == "/?apps=1"
     assert (await alice.get(callback, params=params)).status_code == 400
     alice_account = next(
-        item for item in server.accounts.all_accounts() if item["email"].startswith("alice")
+        item for item in await server.accounts.all_accounts() if item["email"].startswith("alice")
     )
     runtime = server.runtimes.get(alice_account)
     bot = await runtime.store.create_bot("Apps worker", "Tests app access")
@@ -475,7 +475,7 @@ async def test_app_connection_is_private_refreshes_and_revokes(accounts, monkeyp
     account = alice_account["id"]
     tokens = await asyncio.gather(*(server.apps.token(account, name) for _ in range(3)))
     assert tokens == ["refreshed-access"] * 3
-    token = server.apps.credential(account, name)
+    token = await server.apps.credential(account, name)
     assert token["refresh"] == ("rotated-refresh" if name == "github" else "initial-refresh")
     if name == "gmail":
         legacy_reply = {
@@ -488,9 +488,9 @@ async def test_app_connection_is_private_refreshes_and_revokes(accounts, monkeyp
         with pytest.raises(ValueError, match="label permissions"):
             server.apps.normalize(name, legacy_reply)
     assert calls == ["authorization_code", "refresh_token"]
-    data = server.accounts.db.execute("SELECT sealed FROM credentials WHERE kind='app'").fetchone()[
-        0
-    ]
+    data = server.accounts.db.connection.execute(
+        "SELECT sealed FROM credentials WHERE kind='app'"
+    ).fetchone()[0]
     assert b"refreshed-access" not in data and b"refresh" not in data
     await runtime.team.call_plugin(tool, tool_arguments, bot)
 
@@ -498,13 +498,13 @@ async def test_app_connection_is_private_refreshes_and_revokes(accounts, monkeyp
     next_state = parse_qs(urlsplit(next_flow).query)["state"][0]
     if name == "gmail":
         reject_refresh = True
-        server.apps.save(account, name, {**token, "expires": 0})
+        await server.apps.save(account, name, {**token, "expires": 0})
         with pytest.raises(ValueError, match="Reconnect gmail"):
             await server.apps.token(account, name)
-        assert not server.apps.connected(account, name)
+        assert not await server.apps.connected(account, name)
         assert await runtime.store.plugins_for(bot.id) == []
         assert calls[-1] == "refresh_token"
-        server.apps.save(account, name, token)
+        await server.apps.save(account, name, token)
 
     if name == "gmail":
         monkeypatch.delenv(app.secret)
@@ -513,14 +513,14 @@ async def test_app_connection_is_private_refreshes_and_revokes(accounts, monkeyp
         assert gmail["saved"] and not gmail["connected"]
         assert (await alice.delete(path)).json() == {"connected": False, "providerRevoked": False}
         monkeypatch.setenv(app.secret, "app-secret")
-        server.apps.save(account, name, token)
+        await server.apps.save(account, name, token)
         next_flow = (await alice.post(path + "/connect")).json()["url"]
         next_state = parse_qs(urlsplit(next_flow).query)["state"][0]
     result = await alice.delete(path)
     assert result.json() == {"connected": False, "providerRevoked": True}
     assert calls[-1] == "revoke"
     assert (await alice.get(callback, params={**params, "state": next_state})).status_code == 400
-    assert server.apps.credential(account, name) is None
+    assert await server.apps.credential(account, name) is None
     assert await runtime.store.plugins_for(bot.id) == []
 
 

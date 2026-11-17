@@ -200,16 +200,20 @@ class AppConnections:
         app = APPS[name]
         return bool(os.environ.get(app.client_id) and os.environ.get(app.secret))
 
-    def connected(self, account, name):
+    async def connected(self, account, name):
         if name == "telegram":
-            return self.linked_telegram_chat(account) is not None
-        return name in APPS and self.configured(name) and name in self.store.names(account, "app")
+            return await self.linked_telegram_chat(account) is not None
+        return (
+            name in APPS
+            and self.configured(name)
+            and name in await self.store.names(account, "app")
+        )
 
-    def linked_telegram_chat(self, account):
+    async def linked_telegram_chat(self, account):
         if self.telegram_links.bot_id is None:
             return None
         try:
-            saved = self.credential(account, "telegram")
+            saved = await self.credential(account, "telegram")
         except ValueError:
             return None
         if not isinstance(saved, dict) or saved.get("bot_id") != self.telegram_links.bot_id:
@@ -226,7 +230,7 @@ class AppConnections:
 
         async def send_telegram(text):
             async with self.lock(account, "telegram"):
-                chat = self.linked_telegram_chat(account)
+                chat = await self.linked_telegram_chat(account)
                 if chat is None:
                     raise ValueError("Link a private Telegram chat in Apps")
                 return await self.telegram_links.send(chat, text)
@@ -236,22 +240,21 @@ class AppConnections:
             transport=self.transport,
             access_token=token,
             recover_token=recover,
-            available=lambda name: self.connected(account, name),
+            available=lambda name: self.connected(account, name),  # awaited by the runner
         )
 
     def lock(self, account, name):
         return self.locks.setdefault((account, name), asyncio.Lock())
 
-    def credential(self, account, name):
+    async def credential(self, account, name):
         try:
-            raw = self.store.credential(account, "app", name)
+            raw = await self.store.credential(account, "app", name)
             return json.loads(raw) if raw is not None else None
         except (InvalidTag, ValueError):
             raise ValueError(f"Reconnect {name} to restore its credentials") from None
 
-    def save(self, account, name, token):
-        with self.store.db:
-            self.store.put_credential(account, "app", name, json.dumps(token))
+    async def save(self, account, name, token):
+        await self.store.put_credential(account, "app", name, json.dumps(token))
 
     def client_fields(self, name):
         app = APPS[name]
@@ -262,20 +265,19 @@ class AppConnections:
 
     async def wispr_client(self, account, callback):
         try:
-            raw = self.store.credential(account, "app-client", "wispr")
+            raw = await self.store.credential(account, "app-client", "wispr")
             saved = json.loads(raw) if raw else None
         except (InvalidTag, ValueError):
             saved = None
         if isinstance(saved, dict) and saved.get("callback") == callback and saved.get("client_id"):
             return saved["client_id"]
         identifier = await register_client(self.http, callback)
-        with self.store.db:
-            self.store.put_credential(
-                account,
-                "app-client",
-                "wispr",
-                json.dumps({"callback": callback, "client_id": identifier}),
-            )
+        await self.store.put_credential(
+            account,
+            "app-client",
+            "wispr",
+            json.dumps({"callback": callback, "client_id": identifier}),
+        )
         return identifier
 
     async def exchange(self, name, **data):
@@ -373,24 +375,23 @@ class AppConnections:
             **fields,
         )
         updated = {**self.normalize(name, reply, token), **fields}
-        self.save(account, name, updated)
+        await self.save(account, name, updated)
         return updated
 
     async def token(self, account, name, *, rejected=None):
         async with self.lock(account, name):
-            if not self.connected(account, name):
+            if not await self.connected(account, name):
                 raise ValueError(f"Connect {name} in Apps first")
             try:
-                current = self.credential(account, name)
+                current = await self.credential(account, name)
                 token = await self.refresh(
                     account, name, current, force=rejected == current["access"]
                 )
             except AppAuthorizationExpired as exc:
-                self.clear_grants(account, name)
-                with self.store.db:
-                    self.store.delete_app_token(account, name)
-                    if isinstance(exc, AppClientExpired):
-                        self.store.delete_credential(account, "app-client", name)
+                await self.clear_grants(account, name)
+                await self.store.delete_app_token(account, name)
+                if isinstance(exc, AppClientExpired):
+                    await self.store.delete_credential(account, "app-client", name)
                 raise
             return token["access"]
 
@@ -406,24 +407,23 @@ class AppConnections:
             raise web.HTTPUnauthorized(text="Sign in before connecting an app")
         return account["id"]
 
-    def clear_grants(self, account, name):
-        runtime = self.server.runtimes.get(self.store.account(account))
-        with runtime.store.db:
-            runtime.store.db.execute(
-                "DELETE FROM bot_plugins WHERE instance=? AND plugin=?",
-                (runtime.store.instance, name),
-            )
+    async def clear_grants(self, account, name):
+        runtime = self.server.runtimes.get(await self.store.account(account))
+        await runtime.store.shared.run(
+            "DELETE FROM bot_plugins WHERE instance=? AND plugin=?",
+            (runtime.store.instance, name),
+        )
 
     async def list(self, request):
         account = self.identity(request)
         bots = await self.server.service.store.bots()
-        saved = set(self.store.names(account, "app"))
+        saved = set(await self.store.names(account, "app"))
         return web.json_response(
             [
                 {
                     "id": name,
                     "configured": self.configured(name),
-                    "connected": self.connected(account, name)
+                    "connected": await self.connected(account, name)
                     if name == "telegram"
                     else name in saved and self.configured(name),
                     "saved": name in saved,
@@ -459,9 +459,9 @@ class AppConnections:
         if not valid(key):
             raise web.HTTPBadRequest(text=f"Enter a {label} API key")
         async with self.lock(account, name):
-            if self.server.account_from_cookie(request) is None:
+            if (await self.server.account_from_cookie(request)) is None:
                 raise web.HTTPUnauthorized(text=f"Sign in again before connecting {label}")
-            if not self.store.validation_attempt(account):
+            if not await self.store.validation_attempt(account):
                 raise web.HTTPTooManyRequests(text="Try validating the key again in a few minutes")
             try:
                 await check(self.http, key)
@@ -471,15 +471,15 @@ class AppConnections:
                 raise web.HTTPBadGateway(text=f"Could not validate the {label} key") from None
             except (httpx.HTTPError, ValueError):
                 raise web.HTTPBadGateway(text=f"Could not validate the {label} key") from None
-            if self.server.account_from_cookie(request) is None:
+            if (await self.server.account_from_cookie(request)) is None:
                 raise web.HTTPUnauthorized(text=f"Sign in again before connecting {label}")
-            self.clear_grants(account, name)
-            self.save(account, name, {"access": key, "refresh": None, "expires": None})
+            await self.clear_grants(account, name)
+            await self.save(account, name, {"access": key, "refresh": None, "expires": None})
         return web.json_response({"connected": True})
 
     async def bland_call_result(self, request):
         account = self.identity(request)
-        if not self.connected(account, "bland"):
+        if not await self.connected(account, "bland"):
             raise web.HTTPConflict(text="Connect Bland AI in Apps first")
         raw = request.query.get("offset", "0")
         if not raw.isascii() or not raw.isdigit() or len(raw) > 8:
@@ -506,16 +506,18 @@ class AppConnections:
                 text=self.telegram_configuration_error or "Configure the gateway Telegram app bot"
             )
 
-        def save(owner, chat):
-            self.clear_grants(owner, "telegram")
-            self.save(owner, "telegram", {"chat_id": chat, "bot_id": self.telegram_links.bot_id})
+        async def save(owner, chat):
+            await self.clear_grants(owner, "telegram")
+            await self.save(
+                owner, "telegram", {"chat_id": chat, "bot_id": self.telegram_links.bot_id}
+            )
 
         try:
             await self.telegram_links.confirm(account, save)
         except TelegramError:
             raise web.HTTPBadGateway(text="Try confirming the Telegram link again") from None
         return web.json_response(
-            {"connected": self.connected(account, "telegram")},
+            {"connected": await self.connected(account, "telegram")},
             headers={"Cache-Control": "no-store"},
         )
 
@@ -527,9 +529,9 @@ class AppConnections:
                     text=self.telegram_configuration_error
                     or "Configure the gateway Telegram app bot"
                 )
-            if not self.store.validation_attempt(account):
+            if not await self.store.validation_attempt(account):
                 raise web.HTTPTooManyRequests(text="Try again in a few minutes")
-            if self.connected(account, name):
+            if await self.connected(account, name):
                 raise web.HTTPConflict(
                     text="Disconnect the current Telegram chat before linking again"
                 )
@@ -548,7 +550,7 @@ class AppConnections:
         session = request.cookies[SESSION_COOKIE]
         callback = self.callback_url(name)
         async with self.lock(account, name):
-            if self.server.account_from_cookie(request) is None:
+            if (await self.server.account_from_cookie(request)) is None:
                 raise web.HTTPUnauthorized(text="Sign in again before connecting an app")
             flow = verifier
             if name == "wispr":
@@ -558,14 +560,14 @@ class AppConnections:
                     raise web.HTTPBadGateway(
                         text="Could not register the Wispr Flow OAuth client"
                     ) from None
-                if self.server.account_from_cookie(request) is None:
+                if (await self.server.account_from_cookie(request)) is None:
                     raise web.HTTPUnauthorized(text="Sign in again before connecting an app")
                 flow = json.dumps(
                     {"verifier": verifier, "client_id": identifier, "callback": callback}
                 )
             else:
                 identifier = os.environ[APPS[name].client_id]
-            self.store.start_app_flow(account, name, session, state, flow)
+            await self.store.start_app_flow(account, name, session, state, flow)
         query = dict(
             client_id=identifier,
             redirect_uri=callback,
@@ -604,7 +606,7 @@ class AppConnections:
         if name == "telegram" or name in KEY_APPS or len(state) != 43 or not self.configured(name):
             raise web.HTTPBadRequest(text="Start a new app connection")
         async with self.lock(account, name):
-            flow = self.store.consume_app_flow(
+            flow = await self.store.consume_app_flow(
                 account, name, request.cookies[SESSION_COOKIE], state
             )
             if flow is None or not 1 <= len(code) <= 4096:
@@ -629,15 +631,14 @@ class AppConnections:
                 token = {**self.normalize(name, reply), **fields}
             except (httpx.HTTPError, ValueError, TypeError, KeyError) as exc:
                 if isinstance(exc, AppClientExpired):
-                    with self.store.db:
-                        self.store.delete_credential(account, "app-client", name)
+                    await self.store.delete_credential(account, "app-client", name)
                 raise web.HTTPBadGateway(
                     text=f"Could not connect {name}. Start a new connection."
                 ) from None
-            if self.server.account_from_cookie(request) is None:
+            if (await self.server.account_from_cookie(request)) is None:
                 raise web.HTTPUnauthorized(text="Sign in again before connecting an app")
-            self.clear_grants(account, name)
-            self.save(account, name, token)
+            await self.clear_grants(account, name)
+            await self.save(account, name, token)
         raise web.HTTPFound(
             "/?apps=1", headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"}
         )
@@ -688,18 +689,18 @@ class AppConnections:
         name, account = self.name(request), self.identity(request)
         revoked = False
         async with self.lock(account, name):
-            if self.server.account_from_cookie(request) is None:
+            if (await self.server.account_from_cookie(request)) is None:
                 raise web.HTTPUnauthorized(text="Sign in again before disconnecting an app")
             if name == "telegram":
                 self.telegram_links.forget(account)
-            self.clear_grants(account, name)
+            await self.clear_grants(account, name)
             try:
-                token = self.credential(account, name)
+                token = await self.credential(account, name)
                 revoked = token is None or await self.revoke(account, name, token)
             except (httpx.HTTPError, ValueError, TypeError):
                 pass
             finally:
-                self.store.remove_app(account, name)
+                await self.store.remove_app(account, name)
         return web.json_response({"connected": False, "providerRevoked": revoked})
 
     async def grant(self, request):
@@ -715,13 +716,13 @@ class AppConnections:
         ):
             raise web.HTTPBadRequest(text="Expected a Boolean enabled setting")
         async with self.lock(account, name):
-            if self.server.account_from_cookie(request) is None:
+            if (await self.server.account_from_cookie(request)) is None:
                 raise web.HTTPUnauthorized(text="Sign in again before changing app access")
             store = self.server.service.store
             bot = await store.bot(request.match_info["bot"])
             if bot is None or bot.temporary:
                 raise web.HTTPNotFound(text="Unknown bot")
-            if body["enabled"] and not self.connected(account, name):
+            if body["enabled"] and not await self.connected(account, name):
                 raise web.HTTPConflict(text=f"Connect {name} before granting bot access")
             await store.set_plugin(bot.id, name, body["enabled"])
         return web.json_response(body)

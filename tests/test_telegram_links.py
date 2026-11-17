@@ -73,7 +73,7 @@ async def test_telegram_private_links_isolate_accounts_and_destinations(accounts
     updates.append(update(3, alice_code, 101, "private"))
     assert (await alice.post(path + "/confirm")).json() == {"connected": True}
     assert not sends
-    identities = {row["email"]: row for row in server.accounts.all_accounts()}
+    identities = {row["email"]: row for row in await server.accounts.all_accounts()}
     for client, email in ((alice, "alice@example.test"), (bob, "bob@team.test")):
         runtime = server.runtimes.get(identities[email])
         bot = (await runtime.store.bots())[0]

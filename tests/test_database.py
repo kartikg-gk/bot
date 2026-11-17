@@ -124,3 +124,12 @@ async def test_constraint_failure_is_one_error_on_both_backends(database):
     await database.run("INSERT INTO items (id) VALUES (?)", ["a"])
     with pytest.raises(ConstraintError, match="UNIQUE"):
         await database.run("INSERT INTO items (id) VALUES (?)", ["a"])
+
+
+async def test_bytes_round_trip_on_both_backends(database):
+    await database.run("CREATE TABLE secrets (id TEXT PRIMARY KEY, sealed BLOB NOT NULL)")
+    value = bytes(range(256))
+    await database.run("INSERT INTO secrets VALUES (?, ?)", ["a", value])
+    assert await database.query("SELECT sealed FROM secrets WHERE sealed = ?", [value]) == [
+        {"sealed": value}
+    ]
