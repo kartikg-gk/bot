@@ -116,7 +116,7 @@ async def test_mem0_sync_sdk_attempts_share_parent_limit(tmp_path, monkeypatch):
     request = httpx.Request("POST", "https://models.example", json={"model": "mock"})
     try:
         with operation_scope(cfg.instance):
-            budget.reserve_http("openai", request, run=budget.scope())
+            await budget.reserve_http("openai", request, run=budget.scope())
             with pytest.raises(RuntimeError, match="spend limit for this run"):
                 await asyncio.wait_for(extractor.changes("project", 11, "user", "assistant"), 4)
         assert sent == ["mock"]

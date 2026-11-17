@@ -78,7 +78,7 @@ class Mem0Extractor:
             async def debit():
                 if stopped.is_set():
                     raise RuntimeError("Memory extraction was cancelled.")
-                self.budget.reserve_http(self.provider, request, run=run)
+                await self.budget.reserve_http(self.provider, request, run=run)
 
             if stopped.is_set() or loop.is_closed():
                 raise RuntimeError("Memory extraction was cancelled.")

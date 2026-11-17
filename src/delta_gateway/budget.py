@@ -49,7 +49,7 @@ class ModelBudget:
         scoped = operation.get()
         return scoped[1] if scoped and scoped[0] == self.config.instance else RunBudget()
 
-    def reserve_http(self, provider, request, *, run=None):
+    async def reserve_http(self, provider, request, *, run=None):
         run = run if run is not None else self.run.get()
         try:
             model = json.loads(request.content)["model"]
@@ -58,7 +58,7 @@ class ModelBudget:
         maximum = self.config.model_attempt_max_micros.get(f"{provider}/{model}")
         if not isinstance(model, str) or maximum is None or not 0 <= maximum <= 10**12:
             self.refuse(run, "No approved maximum charge is configured for this model.")
-        self.reserve(run=run, micros=maximum)
+        await self.reserve(run=run, micros=maximum)
 
     @staticmethod
     def refuse(run, reason):
@@ -66,7 +66,7 @@ class ModelBudget:
             run.refusal = reason
         raise RuntimeError(reason)
 
-    def reserve(self, *, run=None, micros=None):
+    async def reserve(self, *, run=None, micros=None):
         run = run if run is not None else self.run.get()
         if run is None:
             raise RuntimeError("Model request outside a metered gateway operation")
@@ -79,28 +79,31 @@ class ModelBudget:
         if micros is not None and per_run is not None and run.spend_micros + micros > per_run:
             self.refuse(run, "Model spend limit for this run reached.")
         day = datetime.now(UTC).date().isoformat()
-        with self.store.db:
-            updated = self.store.db.execute(
-                "INSERT INTO model_requests(instance,day,count) VALUES(?,?,1) "
-                "ON CONFLICT(instance,day) DO UPDATE SET count=count+1 WHERE count<? "
-                "RETURNING count",
-                (
-                    self.config.instance,
-                    day,
-                    self.config.model_requests_per_day,
-                ),
-            ).fetchone()
-            if updated is None:
-                self.refuse(run, "Daily model request limit reached. It resets at midnight UTC.")
-            if micros is not None:
-                debit = self.store.db.execute(
-                    "INSERT INTO model_spend(instance,day,micros) SELECT ?,?,? WHERE ?<=? "
-                    "ON CONFLICT(instance,day) DO UPDATE SET micros=micros+excluded.micros "
-                    "WHERE micros<=?-excluded.micros RETURNING micros",
-                    (self.config.instance, day, micros, micros, per_day or 2**62, per_day or 2**62),
-                ).fetchone()
-                if debit is None:
-                    self.refuse(run, "Daily model spend limit reached. It resets at midnight UTC.")
+        # Each limit is checked in the same statement that counts against it.
+        updated = await self.store.shared.query(
+            "INSERT INTO model_requests(instance,day,count) VALUES(?,?,1) "
+            "ON CONFLICT(instance,day) DO UPDATE SET count=count+1 WHERE count<? "
+            "RETURNING count",
+            (self.config.instance, day, self.config.model_requests_per_day),
+        )
+        if not updated:
+            self.refuse(run, "Daily model request limit reached. It resets at midnight UTC.")
+        if micros is not None:
+            limit = per_day or 2**62
+            debit = await self.store.shared.query(
+                "INSERT INTO model_spend(instance,day,micros) SELECT ?,?,? "
+                "WHERE CAST(? AS INTEGER)<=CAST(? AS INTEGER) "
+                "ON CONFLICT(instance,day) DO UPDATE SET micros=micros+excluded.micros "
+                "WHERE micros<=CAST(? AS INTEGER)-excluded.micros RETURNING micros",
+                (self.config.instance, day, micros, micros, limit, limit),
+            )
+            if not debit:
+                # A refused request does not count, as when both ran in one transaction.
+                await self.store.shared.run(
+                    "UPDATE model_requests SET count=count-1 WHERE instance=? AND day=?",
+                    (self.config.instance, day),
+                )
+                self.refuse(run, "Daily model spend limit reached. It resets at midnight UTC.")
         run.requests += 1
         run.spend_micros += micros or 0
 
@@ -116,7 +119,7 @@ class MeteredProvider:
         if spend_metered and hook is not None:
 
             async def before_send(request):
-                budget.reserve_http(name, request)
+                await budget.reserve_http(name, request)
 
             hook(before_send)
 
@@ -126,17 +129,19 @@ class MeteredProvider:
                 if hook is None:
                     budget.refuse(budget.run.get(), "This provider does not support spend limits.")
                 return provider.stream_response(*args, **kwargs)
-            budget.reserve()
-            return self.meter_retries(provider.stream_response(*args, **kwargs), budget)
+            return self.metered(provider, args, kwargs, budget)
 
         self.stream_response = stream_response
 
     @staticmethod
-    async def meter_retries(events, budget):
+    async def metered(provider, args, kwargs, budget):
+        # The first request is reserved before the provider is called at all.
+        await budget.reserve()
+        events = provider.stream_response(*args, **kwargs)
         try:
             async for event in events:
                 if isinstance(event, SourceRetryEvent):
-                    budget.reserve()
+                    await budget.reserve()
                 yield event
         finally:
             if close := getattr(events, "aclose", None):
