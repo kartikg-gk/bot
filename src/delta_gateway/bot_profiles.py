@@ -1,7 +1,7 @@
 """Persistent profiles and shared ownership for bot workspaces."""
 
 import asyncio
-from contextlib import contextmanager
+from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from functools import wraps
 
@@ -60,19 +60,41 @@ def validate_profile(current):
         raise ValueError("Choose a supported avatar shape")
 
 
-@contextmanager
-def reserve(manager, bot_id):
-    if bot_id in manager.active_bots:
-        raise RuntimeError("This bot is working. Wait for it to finish.")
+@asynccontextmanager
+async def holding(manager, bot_id):
+    """The cross-process hold on a bot: a database lease when hosted, else a file lock."""
+    if manager.store.db is None:
+        from delta_gateway.leases import Lease
+
+        lease = Lease(manager.store.shared, f"bot-{bot_id}")
+        try:
+            await lease.__aenter__()
+        except RuntimeError:
+            raise RuntimeError("This bot is working. Wait for it to finish.") from None
+        try:
+            yield
+        finally:
+            await lease.__aexit__()
+        return
     owner = SessionLock(manager.config.state / "bot-locks", bot_id)
-    token = ACTIVE_BOTS.set((*ACTIVE_BOTS.get(), bot_id))
-    manager.active_bots.add(bot_id)
     try:
         yield
     finally:
-        manager.active_bots.discard(bot_id)
-        ACTIVE_BOTS.reset(token)
         owner.close()
+
+
+@asynccontextmanager
+async def reserve(manager, bot_id):
+    if bot_id in manager.active_bots:
+        raise RuntimeError("This bot is working. Wait for it to finish.")
+    async with holding(manager, bot_id):
+        token = ACTIVE_BOTS.set((*ACTIVE_BOTS.get(), bot_id))
+        manager.active_bots.add(bot_id)
+        try:
+            yield
+        finally:
+            manager.active_bots.discard(bot_id)
+            ACTIVE_BOTS.reset(token)
 
 
 def bot_operation(function):
@@ -89,7 +111,7 @@ def bot_operation(function):
                     continue
                 if await manager.store.bot(bot_id) is None:
                     raise ValueError("This bot has been deleted")
-                with reserve(manager, bot_id):
+                async with reserve(manager, bot_id):
                     try:
                         return await function(manager, target, *args, **kwargs)
                     finally:

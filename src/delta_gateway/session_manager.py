@@ -422,7 +422,7 @@ class SessionManager:
     async def remove_computer(self, bot):
         from delta_gateway.bot_profiles import reserve
 
-        with reserve(self, bot.id):
+        async with reserve(self, bot.id):
             await self.restart_idle(bot.id)
             computer = self.computer_for(bot)
             await computer.remove()

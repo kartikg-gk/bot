@@ -3,7 +3,7 @@
 import sqlite3
 from functools import cache
 
-SCHEMA = 19
+SCHEMA = 20
 # Rows that a web request and the runner can both change. Updates go through
 # ``rows.update_versioned``, which only lands on the version it read.
 VERSIONED_TABLES = ("jobs", "web_runs", "approvals", "inbox", "delegations", "scheduler_leases")
@@ -174,6 +174,19 @@ def migrate(db, version):
                 "skill TEXT NOT NULL, path TEXT NOT NULL, content TEXT NOT NULL, "
                 "revision TEXT NOT NULL, PRIMARY KEY(instance,scope,skill,path)); "
                 "PRAGMA user_version=19; COMMIT;"
+            )
+        except BaseException:
+            db.rollback()
+            raise
+
+    if version < 20:
+        # Named leases that stand in for file locks when several processes share a database.
+        try:
+            db.executescript(
+                "BEGIN IMMEDIATE; "
+                "CREATE TABLE IF NOT EXISTS leases(name TEXT PRIMARY KEY, owner TEXT NOT NULL, "
+                "expires REAL NOT NULL); "
+                "PRAGMA user_version=20; COMMIT;"
             )
         except BaseException:
             db.rollback()

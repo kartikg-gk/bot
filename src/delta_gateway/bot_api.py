@@ -108,7 +108,7 @@ class BotAPI(ResourceScope):
         bot = await self.bot(request)
         values = await self.changes(request)
         try:
-            with reserve(self.sessions, bot.id):
+            async with reserve(self.sessions, bot.id):
                 await self.sessions.restart_idle(bot.id)
                 # Profile values are checked first, so a rejected profile leaves the bot as it was.
                 changes = {
@@ -154,7 +154,7 @@ class BotAPI(ResourceScope):
                 text="Finish or cancel this bot's queued messages before deleting it"
             )
         try:
-            with reserve(self.sessions, bot.id):
+            async with reserve(self.sessions, bot.id):
                 await self.sessions.restart_idle(bot.id)
                 computer = self.sessions.computer_for(bot)
                 if hasattr(computer, "remove"):

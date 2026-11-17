@@ -42,7 +42,7 @@ async def test_foreground_and_delegation_share_bot_reservation(web):
         await asyncio.gather(foreground, return_exceptions=True)
         assert (await asyncio.wait_for(delegation, 5))[1] == "completed"
         assert bot.id not in manager.active_bots
-        with reserve(manager, bot.id):
+        async with reserve(manager, bot.id):
             pass
     finally:
         foreground.cancel()
@@ -56,11 +56,11 @@ async def test_bot_reservation_excludes_another_manager(web):
 
     other = SessionManager(service.config, service.store)
     bot = (await service.store.bots())[0]
-    with reserve(service.sessions, bot.id):
+    async with reserve(service.sessions, bot.id):
         with pytest.raises(RuntimeError, match="already owned"):
-            with reserve(other, bot.id):
+            async with reserve(other, bot.id):
                 pytest.fail("overlapping workspace ownership")
-    with reserve(other, bot.id):
+    async with reserve(other, bot.id):
         pass
 
 
@@ -133,5 +133,5 @@ async def test_rename_collision_rolls_back_profile_and_busy_delete_is_refused(we
     assert response.status_code == 409
     assert (await service.store.bot(bot.id)).name == "Reader"
     assert (await profile(service.store, bot))["style"] == "direct"
-    with reserve(service.sessions, bot.id):
+    async with reserve(service.sessions, bot.id):
         assert (await client.delete("/api/bots/" + bot.id)).status_code == 409

@@ -119,7 +119,7 @@ async def test_web_cannot_mutate_busy_bot_resources(web):
 
     bot = await service.store.create_bot("Reader", "Read documents")
     path = "/api/bots/" + bot.id
-    with reserve(service.sessions, bot.id):
+    async with reserve(service.sessions, bot.id):
         assert (
             await client.post(path + "/skills", json={"name": "research", "files": package()})
         ).status_code == 409

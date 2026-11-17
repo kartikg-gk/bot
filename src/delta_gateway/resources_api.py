@@ -80,7 +80,7 @@ class ResourcesAPI(ResourceScope):
                 raise ValueError("Supply a skill name and files")
             await self.current(bot)
             if bot:
-                with reserve(self.sessions, bot.id):
+                async with reserve(self.sessions, bot.id):
                     SkillStore(self.root(bot)).write(body["name"], body["files"])
                     await push(self.store, self.config, bot)
                     await self.sessions.restart_idle(bot.id)
@@ -98,7 +98,7 @@ class ResourcesAPI(ResourceScope):
         try:
             await self.current(bot)
             if bot:
-                with reserve(self.sessions, bot.id):
+                async with reserve(self.sessions, bot.id):
                     SkillStore(self.root(bot)).remove(request.match_info["name"])
                     await push(self.store, self.config, bot)
                     await self.sessions.restart_idle(bot.id)
@@ -131,7 +131,7 @@ class ResourcesAPI(ResourceScope):
             body = await request.json()
             if not isinstance(body, dict) or set(body) != {"file", "text"}:
                 raise ValueError("Supply a note filename and text")
-            with reserve(self.sessions, bot.id):
+            async with reserve(self.sessions, bot.id):
                 write_note(root, body["file"], body["text"])
                 await push(self.store, self.config, bot)
                 await self.sessions.restart_idle(bot.id)
