@@ -41,7 +41,7 @@ async def test_desktop_cli_status_resolves_real_loopback_port_and_scheduler(
     entries = json.loads(capsys.readouterr().out)
     assert entries == [{"instance": cfg.instance, "name": "Desktop", "config": str(path)}]
     store = Store(cfg.database_path, cfg.instance)
-    store.scheduler_heartbeat("fixture", time.time(), 30)
+    await store.scheduler_heartbeat("fixture", time.time(), 30)
     monkeypatch.setattr(
         background,
         "status",

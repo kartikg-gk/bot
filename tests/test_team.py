@@ -36,16 +36,16 @@ async def test_only_the_chief_gets_team_tools(tmp_path, store):
 async def test_one_task_per_bot_and_restart_interrupts(tmp_path, store):
     bot = await store.create_bot("Researcher", "Finds things")
     route = await store.conversation(1, 1)
-    store.begin_delegation(route.id, bot, "one")
+    await store.begin_delegation(route.id, bot, "one")
     with pytest.raises(ValueError, match="busy"):
-        store.begin_delegation(route.id, bot, "two")
+        await store.begin_delegation(route.id, bot, "two")
     store.close()
     reopened = Store(tmp_path / "state", "a" * 32)
     try:
         assert reopened.db.execute("SELECT status FROM delegations").fetchall() == [
             ("interrupted",)
         ]
-        reopened.begin_delegation(route.id, bot, "three")
+        await reopened.begin_delegation(route.id, bot, "three")
     finally:
         reopened.close()
 

@@ -9,7 +9,7 @@ from uuid import uuid4
 
 from delta_gateway import wakeups
 from delta_gateway.bots import Bot
-from delta_gateway.database import SqliteDatabase
+from delta_gateway.database import ConstraintError, SqliteDatabase
 from delta_gateway.migrations import SCHEMA, migrate
 from delta_gateway.routing import admit_message
 from delta_gateway.schedule import next_run
@@ -321,255 +321,6 @@ class Store:
             (self.instance, identifier),
         )
 
-    def add_task(self, chat, user, actor, thread, bot, goal, policy, follow_up):
-        with self.db:
-            return self.db.execute(
-                "INSERT INTO tasks(instance,chat,user,actor,thread,bot,goal,policy,follow_up,"
-                "status,created) VALUES(?,?,?,?,?,?,?,?,?,'running',?)",
-                (
-                    self.instance,
-                    chat,
-                    user,
-                    actor,
-                    thread,
-                    bot,
-                    goal,
-                    policy,
-                    int(follow_up),
-                    time.time(),
-                ),
-            ).lastrowid
-
-    def task(self, identifier):
-        row = self.db.execute(
-            f"SELECT {TASK_FIELDS} FROM tasks WHERE instance=? AND id=?",
-            (self.instance, identifier),
-        ).fetchone()
-        return Task(*row) if row else None
-
-    def tasks(self, limit=20):
-        return [
-            Task(*row)
-            for row in self.db.execute(
-                f"SELECT {TASK_FIELDS} FROM tasks WHERE instance=? ORDER BY id DESC LIMIT ?",
-                (self.instance, limit),
-            ).fetchall()
-        ]
-
-    def running_tasks(self):
-        return self.db.execute(
-            "SELECT count(*) FROM tasks WHERE instance=? AND status='running'", (self.instance,)
-        ).fetchone()[0]
-
-    def finish_task(self, identifier, status, answer):
-        with self.db:
-            self.db.execute(
-                "UPDATE tasks SET status=?,answer=?,finished=?,reported=1 "
-                "WHERE instance=? AND id=?",
-                (status, answer, time.time(), self.instance, identifier),
-            )
-
-    def plugins_for(self, bot):
-        return [
-            row[0]
-            for row in self.db.execute(
-                "SELECT plugin FROM bot_plugins WHERE instance=? AND bot=? ORDER BY plugin",
-                (self.instance, bot),
-            ).fetchall()
-        ]
-
-    def set_plugin(self, bot, plugin, enabled):
-        with self.db:
-            self.db.execute(
-                "INSERT OR IGNORE INTO bot_plugins VALUES(?,?,?)"
-                if enabled
-                else "DELETE FROM bot_plugins WHERE instance=? AND bot=? AND plugin=?",
-                (self.instance, bot, plugin),
-            )
-
-    def add_job(self, chat, user, actor, thread, bot, task, spec, first, missed="run"):
-        if missed not in {"run", "skip"}:
-            raise ValueError("Choose run or skip for missed jobs")
-        with self.db:
-            self.db.execute("BEGIN IMMEDIATE")
-            active = self.db.execute(
-                "SELECT count(*) FROM jobs WHERE instance=? AND actor=? "
-                "AND status IN ('active','paused')",
-                (self.instance, actor),
-            ).fetchone()[0]
-            if active >= MAX_ACTIVE_JOBS:
-                raise ValueError(f"Each person can have at most {MAX_ACTIVE_JOBS} scheduled jobs")
-            return self.db.execute(
-                "INSERT INTO jobs(instance,chat,user,actor,thread,bot,task,spec,next_run,missed,"
-                "created) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-                (
-                    self.instance,
-                    chat,
-                    user,
-                    actor,
-                    thread,
-                    bot,
-                    task,
-                    spec,
-                    first,
-                    missed,
-                    time.time(),
-                ),
-            ).lastrowid
-
-    def job(self, identifier):
-        if type(identifier) is not int or not 0 < identifier < 2**63:
-            return None
-        row = self.db.execute(
-            f"SELECT {JOB_FIELDS} FROM jobs WHERE instance=? AND id=?", (self.instance, identifier)
-        ).fetchone()
-        return Job(*row) if row else None
-
-    def jobs(self, *, actor=None, bot=None, history=False):
-        return [
-            Job(*row)
-            for row in self.db.execute(
-                f"SELECT {JOB_FIELDS} FROM jobs WHERE instance=? "
-                "AND (? IS NULL OR actor=?) AND (? IS NULL OR bot=?) "
-                "AND (? OR status IN ('active','paused') OR running=1) "
-                "ORDER BY CASE WHEN status IN ('active','paused') OR running=1 "
-                "THEN 0 ELSE 1 END,id DESC LIMIT 100",
-                (self.instance, actor, actor, bot, bot, history),
-            )
-        ]
-
-    def scheduler_heartbeat(self, owner, now, ttl):
-        with self.db:
-            self.db.execute("BEGIN IMMEDIATE")
-            lease = self.db.execute(
-                "SELECT owner,expires FROM scheduler_leases WHERE instance=?", (self.instance,)
-            ).fetchone()
-            if lease and lease[1] > now and lease[0] != owner:
-                return False
-            if lease and lease[0] != owner and lease[1] <= now:
-                self.db.execute(
-                    "UPDATE jobs SET running=0,last_status='interrupted',last_answer=NULL "
-                    "WHERE instance=? AND running=1",
-                    (self.instance,),
-                )
-                wakeups.interrupted(self.db, self.instance, now)
-            self.db.execute(
-                f"INSERT INTO {LEASES} VALUES(?,?,?,?) ON CONFLICT(instance) DO UPDATE "
-                "SET owner=excluded.owner,heartbeat=excluded.heartbeat,expires=excluded.expires",
-                (self.instance, owner, now, now + ttl),
-            )
-            return True
-
-    def release_scheduler(self, owner):
-        with self.db:
-            self.db.execute(
-                "DELETE FROM scheduler_leases WHERE instance=? AND owner=?", (self.instance, owner)
-            )
-
-    def claim_due(self, now, *, owner=None, chat=None, busy_bots=None):
-        """Advance each due job before executing it so an interrupted slot is never replayed."""
-        claimed = []
-        occupied = set(busy_bots) if busy_bots is not None else None
-        with self.db:
-            self.db.execute("BEGIN IMMEDIATE")
-            lease = self.db.execute(
-                "SELECT owner FROM scheduler_leases WHERE instance=? AND expires>?",
-                (self.instance, now),
-            ).fetchone()
-            if (lease[0] if lease else None) != owner or not wakeups.enabled(
-                self.db, self.instance
-            ):
-                return claimed
-            for row in self.db.execute(
-                f"SELECT {JOB_FIELDS} FROM jobs WHERE instance=? AND status='active' "
-                "AND running=0 AND (? IS NULL OR chat=?) AND (next_run<=? OR EXISTS ("
-                "SELECT 1 FROM job_wakeups WHERE instance=jobs.instance AND job=jobs.id "
-                "AND status='queued'))",
-                (self.instance, chat, chat, now),
-            ).fetchall():
-                job = Job(*row)
-                if occupied is not None and job.bot in occupied:
-                    continue
-                if job.spec.startswith("event:"):
-                    self.db.execute(
-                        "UPDATE job_wakeups SET status='running',claimed=? WHERE id=("
-                        "SELECT id FROM job_wakeups WHERE instance=? AND job=? "
-                        "AND status='queued' ORDER BY id LIMIT 1)",
-                        (now, self.instance, job.id),
-                    )
-                    self.db.execute(
-                        "UPDATE jobs SET running=1,last_run=? WHERE id=?", (now, job.id)
-                    )
-                    job.running, job.last_run = 1, now
-                    claimed.append(job)
-                    if occupied is not None:
-                        occupied.add(job.bot)
-                    continue
-                upcoming = next_run(job.spec, now)
-                status = "active" if upcoming is not None else "done"
-                if job.missed == "skip" and now - job.next_run > MISSED_GRACE:
-                    self.db.execute(
-                        "UPDATE jobs SET next_run=?,status=?,last_status='missed',last_answer=NULL "
-                        "WHERE id=?",
-                        (upcoming, status, job.id),
-                    )
-                    continue
-                self.db.execute(
-                    "UPDATE jobs SET next_run=?,status=?,running=1,last_run=? WHERE id=?",
-                    (upcoming, status, now, job.id),
-                )
-                job.next_run, job.status, job.running, job.last_run = upcoming, status, 1, now
-                claimed.append(job)
-                if occupied is not None:
-                    occupied.add(job.bot)
-        return claimed
-
-    def finish_job(self, identifier, status, answer=None, *, claimed_at=None):
-        with self.db:
-            changed = self.db.execute(
-                "UPDATE jobs SET running=0,last_status=?,last_answer=? WHERE instance=? AND id=? "
-                "AND (? IS NULL OR (running=1 AND last_run=?))",
-                (status, answer, self.instance, identifier, claimed_at, claimed_at),
-            ).rowcount
-            if changed:
-                self.db.execute(
-                    "UPDATE job_wakeups SET status=?,finished=? WHERE instance=? AND job=? "
-                    "AND claimed=? AND status='running'",
-                    (status, time.time(), self.instance, identifier, claimed_at),
-                )
-
-    def set_job_paused(self, identifier, actor, paused):
-        before, after = ("active", "paused") if paused else ("paused", "active")
-        with self.db:
-            changed = self.db.execute(
-                "UPDATE jobs SET status=? WHERE instance=? AND id=? AND actor=? AND status=?",
-                (after, self.instance, identifier, actor, before),
-            ).rowcount
-        if not changed:
-            raise ValueError(f"No {before} job with that number")
-
-    def edit_job(self, identifier, actor, *, bot, task, spec, first, missed):
-        with self.db:
-            changed = self.db.execute(
-                "UPDATE jobs SET bot=?,task=?,spec=coalesce(?,spec),"
-                "next_run=CASE WHEN ? IS NULL THEN next_run ELSE ? END,missed=? "
-                "WHERE instance=? AND id=? AND actor=? AND status IN ('active','paused') "
-                "AND running=0",
-                (bot, task, spec, spec, first, missed, self.instance, identifier, actor),
-            ).rowcount
-        if not changed:
-            raise ValueError("Only idle active or paused jobs can be edited")
-
-    def cancel_job(self, identifier, actor=None):
-        with self.db:
-            changed = self.db.execute(
-                "UPDATE jobs SET status='cancelled',next_run=NULL WHERE instance=? AND id=? "
-                "AND (? IS NULL OR actor=?) AND (status IN ('active','paused') OR running=1)",
-                (self.instance, identifier, actor, actor),
-            ).rowcount
-        if not changed:
-            raise ValueError("No cancellable job with that number")
-
     async def update_bot(self, identifier, role, instructions):
         await self.shared.run(
             "UPDATE bots SET role=?,instructions=? WHERE instance=? AND id=?",
@@ -579,24 +330,6 @@ class Store:
             "UPDATE bot_profiles SET greeting=NULL WHERE instance=? AND bot=?",
             (self.instance, identifier),
         )
-
-    def begin_delegation(self, route, bot, task):
-        try:
-            with self.db:
-                return self.db.execute(
-                    "INSERT INTO delegations(instance,route,bot,task,status,created) "
-                    "VALUES(?,?,?,?,'running',?)",
-                    (self.instance, route, bot.id, task, time.time()),
-                ).lastrowid
-        except sqlite3.IntegrityError:
-            raise ValueError(f"{bot.name} is busy with another task.") from None
-
-    def finish_delegation(self, identifier, status, answer):
-        with self.db:
-            self.db.execute(
-                "UPDATE delegations SET status=?,answer=?,finished=? WHERE instance=? AND id=?",
-                (status, answer, time.time(), self.instance, identifier),
-            )
 
     def seed_routes(self, session_directory):
         with self.db:
@@ -1209,4 +942,278 @@ class Store:
             "UPDATE inbox SET status=?,version=version+1 WHERE instance=? AND chat=? AND user=? "
             "AND thread=? AND run=? AND status='running'",
             (status, self.instance, chat, user, thread, run),
+        )
+
+    async def add_task(self, chat, user, actor, thread, bot, goal, policy, follow_up):
+        rows = await self.shared.query(
+            "INSERT INTO tasks(instance,chat,user,actor,thread,bot,goal,policy,follow_up,"
+            "status,created) VALUES(?,?,?,?,?,?,?,?,?,'running',?) RETURNING id",
+            (
+                self.instance,
+                chat,
+                user,
+                actor,
+                thread,
+                bot,
+                goal,
+                policy,
+                int(follow_up),
+                time.time(),
+            ),
+        )
+        return rows[0]["id"]
+
+    async def task(self, identifier):
+        rows = await self.shared.query(
+            f"SELECT {TASK_FIELDS} FROM tasks WHERE instance=? AND id=?",
+            (self.instance, identifier),
+        )
+        return Task(*rows[0].values()) if rows else None
+
+    async def tasks(self, limit=20):
+        rows = await self.shared.query(
+            f"SELECT {TASK_FIELDS} FROM tasks WHERE instance=? ORDER BY id DESC LIMIT ?",
+            (self.instance, limit),
+        )
+        return [Task(*row.values()) for row in rows]
+
+    async def running_tasks(self):
+        rows = await self.shared.query(
+            "SELECT count(*) AS n FROM tasks WHERE instance=? AND status='running'",
+            (self.instance,),
+        )
+        return rows[0]["n"]
+
+    async def finish_task(self, identifier, status, answer):
+        await self.shared.run(
+            "UPDATE tasks SET status=?,answer=?,finished=?,reported=1 WHERE instance=? AND id=?",
+            (status, answer, time.time(), self.instance, identifier),
+        )
+
+    async def plugins_for(self, bot):
+        rows = await self.shared.query(
+            "SELECT plugin FROM bot_plugins WHERE instance=? AND bot=? ORDER BY plugin",
+            (self.instance, bot),
+        )
+        return [row["plugin"] for row in rows]
+
+    async def set_plugin(self, bot, plugin, enabled):
+        await self.shared.run(
+            "INSERT OR IGNORE INTO bot_plugins VALUES(?,?,?)"
+            if enabled
+            else "DELETE FROM bot_plugins WHERE instance=? AND bot=? AND plugin=?",
+            (self.instance, bot, plugin),
+        )
+
+    async def add_job(self, chat, user, actor, thread, bot, task, spec, first, missed="run"):
+        if missed not in {"run", "skip"}:
+            raise ValueError("Choose run or skip for missed jobs")
+        # The quota check and the insert are one statement, so two requests cannot both
+        # slip under the limit.
+        rows = await self.shared.query(
+            "INSERT INTO jobs(instance,chat,user,actor,thread,bot,task,spec,next_run,missed,"
+            "created) SELECT ?,?,?,?,?,?,?,?,?,?,? WHERE (SELECT count(*) FROM jobs "
+            "WHERE instance=? AND actor=? AND status IN ('active','paused')) "
+            "< CAST(? AS INTEGER) RETURNING id",
+            (
+                self.instance,
+                chat,
+                user,
+                actor,
+                thread,
+                bot,
+                task,
+                spec,
+                first,
+                missed,
+                time.time(),
+                self.instance,
+                actor,
+                MAX_ACTIVE_JOBS,
+            ),
+        )
+        if not rows:
+            raise ValueError(f"Each person can have at most {MAX_ACTIVE_JOBS} scheduled jobs")
+        return rows[0]["id"]
+
+    async def job(self, identifier):
+        if type(identifier) is not int or not 0 < identifier < 2**63:
+            return None
+        rows = await self.shared.query(
+            f"SELECT {JOB_FIELDS} FROM jobs WHERE instance=? AND id=?", (self.instance, identifier)
+        )
+        return Job(*rows[0].values()) if rows else None
+
+    async def jobs(self, *, actor=None, bot=None, history=False):
+        rows = await self.shared.query(
+            f"SELECT {JOB_FIELDS} FROM jobs WHERE instance=? "
+            "AND (? IS NULL OR actor=?) AND (? IS NULL OR bot=?) "
+            "AND (CAST(? AS INTEGER) OR status IN ('active','paused') OR running=1) "
+            "ORDER BY CASE WHEN status IN ('active','paused') OR running=1 "
+            "THEN 0 ELSE 1 END,id DESC LIMIT 100",
+            (self.instance, actor, actor, bot, bot, int(history)),
+        )
+        return [Job(*row.values()) for row in rows]
+
+    async def scheduler_heartbeat(self, owner, now, ttl):
+        """Take or renew the scheduler lease; False while another owner holds it."""
+        if await self.shared.run(
+            f"INSERT INTO {LEASES} VALUES(?,?,?,?) ON CONFLICT(instance) DO NOTHING",
+            (self.instance, owner, now, now + ttl),
+        ):
+            return True
+        rows = await self.shared.query(
+            "SELECT owner,expires,version FROM scheduler_leases WHERE instance=?",
+            (self.instance,),
+        )
+        if not rows:
+            return False
+        lease = rows[0]
+        if lease["owner"] != owner and lease["expires"] > now:
+            return False
+        # Compare-and-swap on the version read, so only one of two racing owners wins.
+        taken = await self.shared.run(
+            "UPDATE scheduler_leases SET owner=?,heartbeat=?,expires=?,version=version+1 "
+            "WHERE instance=? AND version=?",
+            (owner, now, now + ttl, self.instance, lease["version"]),
+        )
+        if not taken:
+            return False
+        if lease["owner"] != owner:
+            await self.shared.run(
+                "UPDATE jobs SET running=0,last_status='interrupted',last_answer=NULL,"
+                "version=version+1 WHERE instance=? AND running=1",
+                (self.instance,),
+            )
+            await wakeups.mark_interrupted(self.shared, self.instance, now)
+        return True
+
+    async def release_scheduler(self, owner):
+        await self.shared.run(
+            "DELETE FROM scheduler_leases WHERE instance=? AND owner=?", (self.instance, owner)
+        )
+
+    async def claim_due(self, now, *, owner=None, chat=None, busy_bots=None):
+        """Advance each due job before executing it so an interrupted slot is never replayed."""
+        claimed = []
+        occupied = set(busy_bots) if busy_bots is not None else None
+        lease = await self.shared.query(
+            "SELECT owner FROM scheduler_leases WHERE instance=? AND expires>?",
+            (self.instance, now),
+        )
+        if (lease[0]["owner"] if lease else None) != owner or not await wakeups.automation_on(
+            self.shared, self.instance
+        ):
+            return claimed
+        rows = await self.shared.query(
+            f"SELECT {JOB_FIELDS},version FROM jobs WHERE instance=? AND status='active' "
+            "AND running=0 AND (? IS NULL OR chat=?) AND (next_run<=? OR EXISTS ("
+            "SELECT 1 FROM job_wakeups WHERE instance=jobs.instance AND job=jobs.id "
+            "AND status='queued'))",
+            (self.instance, chat, chat, now),
+        )
+        for row in rows:
+            version = row.pop("version")
+            job = Job(*row.values())
+            if occupied is not None and job.bot in occupied:
+                continue
+            # Each claim only lands on the version read, so a job is never claimed twice.
+            guard = "WHERE instance=? AND id=? AND version=? AND running=0 AND status='active'"
+            if job.spec.startswith("event:"):
+                if not await self.shared.run(
+                    f"UPDATE jobs SET running=1,last_run=?,version=version+1 {guard}",
+                    (now, self.instance, job.id, version),
+                ):
+                    continue
+                await self.shared.run(
+                    "UPDATE job_wakeups SET status='running',claimed=? WHERE id=("
+                    "SELECT id FROM job_wakeups WHERE instance=? AND job=? "
+                    "AND status='queued' ORDER BY id LIMIT 1)",
+                    (now, self.instance, job.id),
+                )
+                job.running, job.last_run = 1, now
+                claimed.append(job)
+                if occupied is not None:
+                    occupied.add(job.bot)
+                continue
+            upcoming = next_run(job.spec, now)
+            status = "active" if upcoming is not None else "done"
+            if job.missed == "skip" and now - job.next_run > MISSED_GRACE:
+                await self.shared.run(
+                    "UPDATE jobs SET next_run=?,status=?,last_status='missed',last_answer=NULL,"
+                    f"version=version+1 {guard}",
+                    (upcoming, status, self.instance, job.id, version),
+                )
+                continue
+            if not await self.shared.run(
+                "UPDATE jobs SET next_run=?,status=?,running=1,last_run=?,version=version+1 "
+                + guard,
+                (upcoming, status, now, self.instance, job.id, version),
+            ):
+                continue
+            job.next_run, job.status, job.running, job.last_run = upcoming, status, 1, now
+            claimed.append(job)
+            if occupied is not None:
+                occupied.add(job.bot)
+        return claimed
+
+    async def finish_job(self, identifier, status, answer=None, *, claimed_at=None):
+        changed = await self.shared.run(
+            "UPDATE jobs SET running=0,last_status=?,last_answer=?,version=version+1 "
+            "WHERE instance=? AND id=? AND (? IS NULL OR (running=1 AND last_run=?))",
+            (status, answer, self.instance, identifier, claimed_at, claimed_at),
+        )
+        if changed:
+            await self.shared.run(
+                "UPDATE job_wakeups SET status=?,finished=? WHERE instance=? AND job=? "
+                "AND claimed=? AND status='running'",
+                (status, time.time(), self.instance, identifier, claimed_at),
+            )
+
+    async def set_job_paused(self, identifier, actor, paused):
+        before, after = ("active", "paused") if paused else ("paused", "active")
+        changed = await self.shared.run(
+            "UPDATE jobs SET status=?,version=version+1 WHERE instance=? AND id=? AND actor=? "
+            "AND status=?",
+            (after, self.instance, identifier, actor, before),
+        )
+        if not changed:
+            raise ValueError(f"No {before} job with that number")
+
+    async def edit_job(self, identifier, actor, *, bot, task, spec, first, missed):
+        changed = await self.shared.run(
+            "UPDATE jobs SET bot=?,task=?,spec=coalesce(?,spec),"
+            "next_run=CASE WHEN ? IS NULL THEN next_run ELSE ? END,missed=?,version=version+1 "
+            "WHERE instance=? AND id=? AND actor=? AND status IN ('active','paused') "
+            "AND running=0",
+            (bot, task, spec, spec, first, missed, self.instance, identifier, actor),
+        )
+        if not changed:
+            raise ValueError("Only idle active or paused jobs can be edited")
+
+    async def cancel_job(self, identifier, actor=None):
+        changed = await self.shared.run(
+            "UPDATE jobs SET status='cancelled',next_run=NULL,version=version+1 WHERE instance=? "
+            "AND id=? AND (? IS NULL OR actor=?) AND (status IN ('active','paused') OR running=1)",
+            (self.instance, identifier, actor, actor),
+        )
+        if not changed:
+            raise ValueError("No cancellable job with that number")
+
+    async def begin_delegation(self, route, bot, task):
+        try:
+            rows = await self.shared.query(
+                "INSERT INTO delegations(instance,route,bot,task,status,created) "
+                "VALUES(?,?,?,?,'running',?) RETURNING id",
+                (self.instance, route, bot.id, task, time.time()),
+            )
+        except ConstraintError:
+            raise ValueError(f"{bot.name} is busy with another task.") from None
+        return rows[0]["id"]
+
+    async def finish_delegation(self, identifier, status, answer):
+        await self.shared.run(
+            "UPDATE delegations SET status=?,answer=?,finished=?,version=version+1 "
+            "WHERE instance=? AND id=?",
+            (status, answer, time.time(), self.instance, identifier),
         )

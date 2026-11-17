@@ -725,16 +725,16 @@ class Service:
     async def spawn(self, goal, bot_name, writer, follow_up, route, actor):
         if writer and self.config.executor == "local":
             raise ValueError("Writer agents need a sandbox: the Docker or Daytona executor.")
-        if self.store.running_tasks() >= MAX_AGENTS:
+        if await self.store.running_tasks() >= MAX_AGENTS:
             raise ValueError(f"At most {MAX_AGENTS} background agents can run at once.")
         delegation = None
         if bot_name:
             bot = await self.team.teammate(bot_name)
-            delegation = self.store.begin_delegation(route.id, bot, goal)
+            delegation = await self.store.begin_delegation(route.id, bot, goal)
         else:
             name = "Agent-" + uuid4().hex[:8]
             bot = await self.store.create_bot(name, "Temporary agent for one goal.", temporary=True)
-        task = self.store.add_task(
+        task = await self.store.add_task(
             route.chat,
             route.user,
             actor,
@@ -758,7 +758,7 @@ class Service:
     @traced("background")
     @budgeted
     async def run_task(self, identifier, delegation):
-        task = self.store.task(identifier)
+        task = await self.store.task(identifier)
         route = await self.store.conversation(*task.key)
         calls = set()
         bot = None
@@ -790,8 +790,8 @@ class Service:
                 call.cancel()
             await asyncio.gather(*calls, return_exceptions=True)
             if delegation is not None:
-                self.store.finish_delegation(delegation, status, answer)
-            self.store.finish_task(identifier, status, answer[:MAX_ANSWER])
+                await self.store.finish_delegation(delegation, status, answer)
+            await self.store.finish_task(identifier, status, answer[:MAX_ANSWER])
         if self.stopping:
             return
         with contextlib.suppress(TelegramError, ValueError):
@@ -817,7 +817,7 @@ class Service:
                     [
                         f"#{t.id} {t.status} {getattr(await self.store.bot(t.bot), 'name', '-')}"
                         f": {t.goal[:100]}"
-                        for t in self.store.tasks()
+                        for t in await self.store.tasks()
                     ]
                 )
                 or "No background tasks."
@@ -825,7 +825,7 @@ class Service:
         number, _, rest = argument.partition(" ")
         if not number.isdigit():
             raise ValueError(f"Use {command} <number>")
-        task = self.store.task(int(number))
+        task = await self.store.task(int(number))
         if not task:
             raise ValueError("No task with that number")
         if command == "/cancel":
@@ -844,28 +844,30 @@ class Service:
         shutil.rmtree(bot_root(self.config, bot), ignore_errors=True)
         return f"Discarded task #{task.id}'s agent and its files."
 
-    def cancel_job(self, identifier, actor):
-        self.store.cancel_job(identifier, actor)
+    async def cancel_job(self, identifier, actor):
+        await self.store.cancel_job(identifier, actor)
         if task := self.job_tasks.get(identifier):
             task.cancel()
 
     async def schedule_loop(self):
         while not self.stopping:
-            self.run_due()
+            await self.run_due()
             await asyncio.sleep(2)
 
-    def run_due(self):
+    async def run_due(self):
         now = time.time()
-        if not self.store.scheduler_heartbeat(self.scheduler_owner, now, 30):
+        if not await self.store.scheduler_heartbeat(self.scheduler_owner, now, 30):
             for task in self.job_tasks.values():
                 task.cancel()
             return
         chat = WEB_CHAT if self.config.web_only else None
         busy = set(self.sessions.active_bots)
         for identifier, task in self.job_tasks.items():
-            if not task.done() and (job := self.store.job(identifier)):
+            if not task.done() and (job := await self.store.job(identifier)):
                 busy.add(job.bot)
-        for job in self.store.claim_due(now, owner=self.scheduler_owner, chat=chat, busy_bots=busy):
+        for job in await self.store.claim_due(
+            now, owner=self.scheduler_owner, chat=chat, busy_bots=busy
+        ):
             task = asyncio.create_task(self.run_job(job))
             self.job_tasks[job.id] = task
             task.add_done_callback(
@@ -900,7 +902,7 @@ class Service:
             if not bot:
                 raise ValueError("This job's bot no longer exists.")
             if not bot.chief:
-                record = self.store.begin_delegation(route.id, bot, job.task)
+                record = await self.store.begin_delegation(route.id, bot, job.task)
             async with self.slots:
                 answer, status = await self.sessions.delegate(
                     bot, job.task, event, review_durable=False
@@ -909,7 +911,7 @@ class Service:
                 route, f"Job #{job.id} ({bot.name}), {status}:\n{answer or 'No answer.'}"
             )
         except asyncio.CancelledError:
-            current = self.store.job(job.id)
+            current = await self.store.job(job.id)
             if current and current.status == "cancelled":
                 status = "cancelled"
             raise
@@ -926,12 +928,14 @@ class Service:
                 call.cancel()
             await asyncio.gather(*calls, return_exceptions=True)
             if record is not None:
-                self.store.finish_delegation(record, status, answer)
-            self.store.finish_job(job.id, status, answer[:MAX_ANSWER], claimed_at=job.last_run)
+                await self.store.finish_delegation(record, status, answer)
+            await self.store.finish_job(
+                job.id, status, answer[:MAX_ANSWER], claimed_at=job.last_run
+            )
 
     async def schedule_command(self, route, actor, command, argument):
         if command == "/jobs":
-            jobs = self.store.jobs(actor=actor)
+            jobs = await self.store.jobs(actor=actor)
             if not jobs:
                 return "No scheduled jobs."
             return "\n".join(
@@ -945,10 +949,10 @@ class Service:
             if not argument.isdigit() or len(argument) > 18:
                 raise ValueError(f"Use {command} <number>")
             if command == "/unschedule":
-                self.cancel_job(int(argument), actor)
+                await self.cancel_job(int(argument), actor)
                 return f"Cancelled job #{argument}."
             paused = command == "/pausejob"
-            self.store.set_job_paused(int(argument), actor, paused)
+            await self.store.set_job_paused(int(argument), actor, paused)
             return f"{'Paused' if paused else 'Resumed'} job #{argument}."
         pieces = [piece.strip() for piece in argument.split("|", 2)]
         if len(pieces) < 2 or not pieces[-1]:
@@ -960,7 +964,7 @@ class Service:
         )
         if not bot:
             raise ValueError("No bot with that name. Use /bot to list them.")
-        identifier = self.team.schedule(pieces[0], pieces[-1], bot, route, actor)
+        identifier = await self.team.schedule(pieces[0], pieces[-1], bot, route, actor)
         return f"Scheduled job #{identifier} for {bot.name}."
 
     async def plugin_command(self, route, command, argument):
@@ -968,7 +972,9 @@ class Service:
             lines = []
             for name in PLUGINS:
                 users = [
-                    b.name for b in await self.store.bots() if name in self.store.plugins_for(b.id)
+                    b.name
+                    for b in await self.store.bots()
+                    if name in await self.store.plugins_for(b.id)
                 ]
                 state = "ready" if self.team.plugins.configured(name) else "not set up"
                 lines.append(f"{name} ({state}): {', '.join(users) or 'no bots'}")
@@ -982,7 +988,7 @@ class Service:
             raise ValueError("No bot with that name. Use /bot to list them.")
         if action == "on" and not self.team.plugins.configured(name):
             raise ValueError(f"{name} is not set up on the gateway.")
-        self.store.set_plugin(bot.id, name, action == "on")
+        await self.store.set_plugin(bot.id, name, action == "on")
         await self.sessions.restart_idle()
         return f"{name} is {action} for {bot.name}. It applies from the bot's next start."
 
@@ -1357,7 +1363,7 @@ class Service:
         for job in running:
             job.cancel()
         await asyncio.gather(*running, return_exceptions=True)
-        self.store.release_scheduler(self.scheduler_owner)
+        await self.store.release_scheduler(self.scheduler_owner)
         if self.memory:
             self.memory.close()
         if self.web:

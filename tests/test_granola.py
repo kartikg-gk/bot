@@ -121,4 +121,4 @@ async def test_granola_saved_key_is_private_and_reads_notes_and_transcripts(acco
     )
     assert transcript["cursor"] == "page-three" and transcript["items"][0]["text"] == "Next steps"
     assert (await alice.delete(route)).json() == {"connected": False, "providerRevoked": False}
-    assert not runtime.store.plugins_for(bot.id)
+    assert not await runtime.store.plugins_for(bot.id)

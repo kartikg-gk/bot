@@ -27,6 +27,10 @@ class DatabaseConfigError(ValueError):
     """The D1 settings are incomplete."""
 
 
+class ConstraintError(RuntimeError):
+    """A write broke a UNIQUE, NOT NULL, CHECK or foreign key rule. Same type on both backends."""
+
+
 class Database(Protocol):
     async def query(self, sql: str, params: Sequence = ()) -> list[dict]: ...
 
@@ -76,7 +80,10 @@ class SqliteDatabase:
     def _execute(self, sql, params):
         with self.lock:
             before = self.connection.total_changes
-            rows = self.connection.execute(sql, params).fetchall()
+            try:
+                rows = self.connection.execute(sql, params).fetchall()
+            except sqlite3.IntegrityError as error:
+                raise ConstraintError(str(error)) from None
             return [dict(row) for row in rows], self.connection.total_changes - before
 
     async def _call(self, sql, params):
@@ -157,7 +164,10 @@ class D1Database:
                 for error in payload.get("errors") or []
                 if isinstance(error, dict)
             )
-            raise RuntimeError(f"{status}: {details}" if details else f"{status}.")
+            message = f"{status}: {details}" if details else f"{status}."
+            if "constraint failed" in details.lower():
+                raise ConstraintError(message)
+            raise RuntimeError(message)
         return results
 
     async def query(self, sql, params=()):

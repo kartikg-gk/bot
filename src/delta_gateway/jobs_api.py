@@ -38,9 +38,9 @@ class JobsAPI(ResourceScope):
         result["bot_name"] = getattr(await self.store.bot(job.bot), "name", "Deleted bot")
         return result
 
-    def job(self, request):
+    async def job(self, request):
         identifier = request.match_info["job"]
-        job = self.store.job(int(identifier)) if len(identifier) <= 18 else None
+        job = await self.store.job(int(identifier)) if len(identifier) <= 18 else None
         if not job or job.actor != self.server.actor:
             raise web.HTTPNotFound(text="Unknown job")
         return job
@@ -70,7 +70,7 @@ class JobsAPI(ResourceScope):
                 "automation": wakeups.enabled(self.store.db, self.store.instance),
                 "jobs": [
                     await self.view(job)
-                    for job in self.store.jobs(actor=self.server.actor, history=True)
+                    for job in await self.store.jobs(actor=self.server.actor, history=True)
                 ],
                 "scheduler": dict(zip(("heartbeat", "expires"), heartbeat, strict=True))
                 if heartbeat
@@ -79,7 +79,7 @@ class JobsAPI(ResourceScope):
         )
 
     async def details(self, request):
-        job = self.job(request)
+        job = await self.job(request)
         data = await self.view(job, answer=True)
         data["wakeups"] = wakeups.history(self.store.db, self.store.instance, job.id)
         return web.json_response(data)
@@ -97,7 +97,7 @@ class JobsAPI(ResourceScope):
             raise web.HTTPBadRequest(text="Provide a Boolean enabled setting")
         wakeups.set_enabled(self.store.db, self.store.instance, body["enabled"])
         if body["enabled"]:
-            self.service.run_due()
+            await self.service.run_due()
         return web.json_response(body)
 
     async def event(self, request):
@@ -117,7 +117,7 @@ class JobsAPI(ResourceScope):
         except RuntimeError as error:
             raise web.HTTPConflict(text=str(error)) from None
         if result["accepted"]:
-            self.service.run_due()
+            await self.service.run_due()
         return web.json_response(result, status=202)
 
     async def create(self, request):
@@ -130,7 +130,7 @@ class JobsAPI(ResourceScope):
         route = await self.store.conversation(WEB_CHAT, self.server.actor)
         try:
             spec, first = parse_when(values["when"])
-            identifier = self.store.add_job(
+            identifier = await self.store.add_job(
                 *route.key[:2],
                 self.server.actor,
                 route.thread,
@@ -142,18 +142,18 @@ class JobsAPI(ResourceScope):
             )
         except ValueError as exc:
             raise web.HTTPBadRequest(text=str(exc)) from None
-        return web.json_response(await self.view(self.store.job(identifier)), status=201)
+        return web.json_response(await self.view(await self.store.job(identifier)), status=201)
 
     async def edit(self, request):
         values = await self.changes(request)
-        job = self.job(request)
+        job = await self.job(request)
         bot = await self.bot(values.get("bot", job.bot))
         try:
             spec, first = parse_when(values["when"]) if "when" in values else (None, None)
         except ValueError as exc:
             raise web.HTTPBadRequest(text=str(exc)) from None
         try:
-            self.store.edit_job(
+            await self.store.edit_job(
                 job.id,
                 self.server.actor,
                 bot=bot.id,
@@ -164,16 +164,16 @@ class JobsAPI(ResourceScope):
             )
         except ValueError as exc:
             raise web.HTTPConflict(text=str(exc)) from None
-        return web.json_response(await self.view(self.store.job(job.id)))
+        return web.json_response(await self.view(await self.store.job(job.id)))
 
     async def change_status(self, request):
-        job = self.job(request)
+        job = await self.job(request)
         action = request.match_info["action"]
         try:
             if action == "cancel":
-                self.service.cancel_job(job.id, self.server.actor)
+                await self.service.cancel_job(job.id, self.server.actor)
             else:
-                self.store.set_job_paused(job.id, self.server.actor, action == "pause")
+                await self.store.set_job_paused(job.id, self.server.actor, action == "pause")
         except ValueError as exc:
             raise web.HTTPConflict(text=str(exc)) from None
-        return web.json_response(await self.view(self.store.job(job.id)))
+        return web.json_response(await self.view(await self.store.job(job.id)))

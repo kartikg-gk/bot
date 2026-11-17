@@ -42,7 +42,7 @@ async def test_spawn_returns_at_once_and_reports_to_chat(setup):
     task = await spawn(service)
     assert task in service.agent_tasks
     await finished(service)
-    row = service.store.task(task)
+    row = await service.store.task(task)
     assert row.status == "completed" and "done" in row.answer
     assert any(f"Task #{task}" in text and "done" in text for _, text, _ in telegram.sent)
 
@@ -51,7 +51,7 @@ async def test_temporary_agent_is_hidden_and_has_its_own_workspace(setup):
     service, c, _ = setup
     task = await spawn(service)
     await finished(service)
-    bot = await service.store.bot(service.store.task(task).bot)
+    bot = await service.store.bot((await service.store.task(task)).bot)
     assert bot.temporary and bot not in await service.store.bots()
     assert (c.state / "bots" / bot.id / "workspace").is_dir()
 
@@ -60,7 +60,7 @@ async def test_agent_is_read_only_by_default(setup):
     service, c, _ = setup
     task = await spawn(service, "write")
     await finished(service)
-    row = service.store.task(task)
+    row = await service.store.task(task)
     assert row.policy == "deny" and row.status == "completed"
     assert not (c.state / "bots" / row.bot / "workspace" / "approved.txt").exists()
 
@@ -98,7 +98,7 @@ async def test_cancel_through_command(setup):
     task = await spawn(service, "slow")
     await command(service, c, 1, f"/cancel {task}")
     await finished(service)
-    assert service.store.task(task).status == "cancelled"
+    assert (await service.store.task(task)).status == "cancelled"
 
 
 async def test_time_limit(setup, monkeypatch):
@@ -106,7 +106,7 @@ async def test_time_limit(setup, monkeypatch):
     service, _, telegram = setup
     task = await spawn(service, "slow")
     await finished(service)
-    assert service.store.task(task).status == "timed_out"
+    assert (await service.store.task(task)).status == "timed_out"
     assert any("timed_out" in text for _, text, _ in telegram.sent)
 
 
@@ -126,8 +126,8 @@ async def test_keep_and_discard_temporary_agents(setup):
     gone = await spawn(service)
     await finished(service)
     await command(service, c, 1, f"/keep {kept} Scout")
-    assert (await service.store.find_bot("Scout")).id == service.store.task(kept).bot
-    gone_bot = service.store.task(gone).bot
+    assert (await service.store.find_bot("Scout")).id == (await service.store.task(kept)).bot
+    gone_bot = (await service.store.task(gone)).bot
     await command(service, c, 2, f"/discard {gone}")
     assert await service.store.bot(gone_bot) is None
     assert not (c.state / "bots" / gone_bot).exists()
@@ -145,11 +145,11 @@ async def test_discard_refuses_a_kept_bot(setup):
 async def test_restart_reports_interrupted_work_once(tmp_path):
     store = Store(tmp_path / "state", "a" * 32)
     bot = await store.create_bot("Agent", "x", temporary=True)
-    task = store.add_task(11, 11, 11, 0, bot.id, "goal", "deny", False)
+    task = await store.add_task(11, 11, 11, 0, bot.id, "goal", "deny", False)
     store.close()
     store = Store(tmp_path / "state", "a" * 32)
     try:
-        assert store.task(task).status == "interrupted"
+        assert (await store.task(task)).status == "interrupted"
         assert [t.id for t in await store.take_unreported()] == [task]
         assert await store.take_unreported() == []
     finally:

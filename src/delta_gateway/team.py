@@ -173,15 +173,15 @@ class Team:
             raise ValueError("That is you. Do the work yourself.")
         return bot
 
-    def schedule(self, when, task, bot, route, actor):
+    async def schedule(self, when, task, bot, route, actor):
         spec, first = parse_when(when)
-        return self.store.add_job(
+        return await self.store.add_job(
             route.chat, route.user, actor, route.thread, bot.id, task, spec, first
         )
 
     async def call_plugin(self, name, arguments, bot):
         plugin = TOOL_OWNERS[name]
-        if not bot or plugin not in self.store.plugins_for(bot.id):
+        if not bot or plugin not in await self.store.plugins_for(bot.id):
             raise ValueError(f"{plugin} is not enabled for this bot.")
         if not self.plugins.configured(plugin):
             raise ValueError(f"{plugin} is not set up on the gateway.")
@@ -226,7 +226,9 @@ class Team:
             target = await self.store.find_bot(requested) if requested else current
             if target is None or target.temporary:
                 raise ValueError("Choose a persistent bot")
-            identifier = self.schedule(arguments["when"], arguments["task"], target, route, owner)
+            identifier = await self.schedule(
+                arguments["when"], arguments["task"], target, route, owner
+            )
             return f"Scheduled job {identifier}."
         if name == "list_scheduled_jobs":
             return json.dumps(
@@ -238,16 +240,16 @@ class Team:
                         schedule=j.spec,
                         status=j.status,
                     )
-                    for j in self.store.jobs(
+                    for j in await self.store.jobs(
                         actor=owner, bot=bot.id if bot and not bot.chief else None
                     )
                 ]
             )
         if name == "cancel_scheduled_job":
-            job = self.store.job(arguments["job_id"])
+            job = await self.store.job(arguments["job_id"])
             if not job or job.actor != owner or (bot and not bot.chief and job.bot != bot.id):
                 raise ValueError("No cancellable job with that number")
-            self.job_canceller(job.id, owner)
+            await self.job_canceller(job.id, owner)
             return "Cancelled."
         if bot and not bot.chief:
             raise ValueError("Only the chief of staff can use this tool.")
@@ -263,10 +265,13 @@ class Team:
             return f"Started task #{identifier} in the background."
         if name == "list_tasks":
             return json.dumps(
-                [dict(id=t.id, status=t.status, goal=t.goal[:200]) for t in self.store.tasks()]
+                [
+                    dict(id=t.id, status=t.status, goal=t.goal[:200])
+                    for t in await self.store.tasks()
+                ]
             )
         if name == "check_task":
-            task = self.store.task(arguments["task_id"])
+            task = await self.store.task(arguments["task_id"])
             if not task:
                 raise ValueError("No task with that number")
             return json.dumps(dict(id=task.id, status=task.status, answer=task.answer or ""))
@@ -299,7 +304,7 @@ class Team:
 
     async def delegate(self, name, task, route, event):
         bot = await self.teammate(name)
-        record = self.store.begin_delegation(route.id, bot, task)
+        record = await self.store.begin_delegation(route.id, bot, task)
         answer, status = "", "interrupted"
         try:
             with observation("delegation", "agent"):
@@ -307,7 +312,7 @@ class Team:
                     bot, task, (lambda client, item: event(bot, client, item)) if event else None
                 )
         finally:
-            self.store.finish_delegation(record, status, answer)
+            await self.store.finish_delegation(record, status, answer)
         if len(answer) > MAX_ANSWER:
             answer = answer[:MAX_ANSWER] + "\n[Truncated]"
         return json.dumps(dict(bot=bot.name, status=status, answer=answer))

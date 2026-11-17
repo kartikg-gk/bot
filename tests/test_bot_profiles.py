@@ -24,14 +24,20 @@ async def test_foreground_and_delegation_share_bot_reservation(web):
     await wait_working(manager, bot)
     delegation = asyncio.create_task(manager.delegate(bot, "Follow up", policy="deny"))
     try:
-        await asyncio.sleep(0.1)
-        assert not delegation.done()
-        assert (
-            service.store.db.execute(
+
+        def recorded():
+            return service.store.db.execute(
                 "SELECT count(*) FROM bot_chat WHERE bot=? AND role='user'", (bot.id,)
             ).fetchone()[0]
-            == 1
-        )
+
+        # The foreground prompt records its message once its session is up; the
+        # delegation must still be waiting for the bot, so nothing more is recorded.
+        async with asyncio.timeout(5):
+            while not recorded():
+                await asyncio.sleep(0.01)
+        await asyncio.sleep(0.1)
+        assert not delegation.done()
+        assert recorded() == 1
         foreground.cancel()
         await asyncio.gather(foreground, return_exceptions=True)
         assert (await asyncio.wait_for(delegation, 5))[1] == "completed"

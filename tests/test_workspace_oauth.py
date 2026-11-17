@@ -109,4 +109,4 @@ async def test_workspace_oauth_is_private_rotates_on_401_and_revokes(accounts, m
     ).fetchone()[0]
     assert b"fresh-access" not in sealed and b"fresh-refresh" not in sealed
     assert (await alice.delete(route)).json() == {"connected": False, "providerRevoked": True}
-    assert runtime.store.plugins_for(bot.id) == [] and calls[-1] == "revoke"
+    assert await runtime.store.plugins_for(bot.id) == [] and calls[-1] == "revoke"

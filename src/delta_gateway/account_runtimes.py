@@ -59,7 +59,7 @@ class AccountRuntimes:
             for service in tuple(self.services.values()):
                 try:
                     await service.dispatch()
-                    service.run_due()
+                    await service.run_due()
                     await service.cleanup_idle()
                     await service.store.retain()
                 except Exception:

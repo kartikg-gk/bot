@@ -61,9 +61,9 @@ async def test_only_granted_bots_can_call_a_plugin(store, monkeypatch):
     arguments = dict(repo="a/b")
     with pytest.raises(ValueError, match="not enabled"):
         await team.run("github_list_issues", arguments, route, bot=worker)
-    store.set_plugin(worker.id, "github", True)
+    await store.set_plugin(worker.id, "github", True)
     assert "Ignore" in await team.run("github_list_issues", arguments, route, bot=worker)
-    store.set_plugin(worker.id, "github", False)
+    await store.set_plugin(worker.id, "github", False)
     with pytest.raises(ValueError, match="not enabled"):
         await team.run("github_list_issues", arguments, route, bot=worker)
     with pytest.raises(ValueError, match="Only the chief"):
@@ -95,14 +95,14 @@ async def test_plugin_commands(tmp_path, monkeypatch):
         worker = await service.store.create_bot("Researcher", "Finds things")
         await command(service, c, 1, "/plugin on github Researcher")
         assert any("not set up" in text for _, text, _ in telegram.sent)
-        assert service.store.plugins_for(worker.id) == []
+        assert await service.store.plugins_for(worker.id) == []
         monkeypatch.setenv(GITHUB_TOKEN, "secret-token")
         await command(service, c, 2, "/plugin on github Researcher")
-        assert service.store.plugins_for(worker.id) == ["github"]
+        assert await service.store.plugins_for(worker.id) == ["github"]
         await command(service, c, 3, "/plugins")
         assert any("github" in text and "Researcher" in text for _, text, _ in telegram.sent)
         await command(service, c, 4, "/plugin off github Researcher")
-        assert service.store.plugins_for(worker.id) == []
+        assert await service.store.plugins_for(worker.id) == []
     finally:
         await service.close()
 
@@ -127,7 +127,7 @@ async def test_delegated_bot_calls_a_plugin_through_the_gateway(tmp_path, monkey
     service.team.plugins = PluginRunner(transport=httpx.MockTransport(recorded))
     try:
         worker = await service.store.create_bot("Researcher", "Finds things")
-        service.store.set_plugin(worker.id, "github", True)
+        await service.store.set_plugin(worker.id, "github", True)
         await command(service, c, 1, "delegate:Researcher:plugin")
         assert calls == ["/repos/a/b/issues"]
         status = service.store.db.execute("SELECT status FROM delegations").fetchone()[0]

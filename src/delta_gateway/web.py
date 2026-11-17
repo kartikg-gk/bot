@@ -426,7 +426,7 @@ class WebServer:
                 goal=t.goal[:200],
                 bot=getattr(await self.service.store.bot(t.bot), "name", "-"),
             )
-            for t in self.service.store.tasks()
+            for t in await self.service.store.tasks()
         ]
         return web.json_response(rows)
 

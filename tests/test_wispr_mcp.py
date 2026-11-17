@@ -243,7 +243,7 @@ async def test_wispr_registration_browser_binding_rotation_and_local_disconnect(
     ).fetchone()[0]
     assert b"fresh-access" not in sealed and b"fresh-refresh" not in sealed
     assert (await alice.delete(route)).json() == {"connected": False, "providerRevoked": False}
-    assert runtime.store.plugins_for(bot.id) == []
+    assert await runtime.store.plugins_for(bot.id) == []
     reject_client = True
     pending = await start()
     assert (await alice.get(callback, params=pending)).status_code == 502

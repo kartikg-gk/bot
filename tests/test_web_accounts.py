@@ -502,7 +502,7 @@ async def test_app_connection_is_private_refreshes_and_revokes(accounts, monkeyp
         with pytest.raises(ValueError, match="Reconnect gmail"):
             await server.apps.token(account, name)
         assert not server.apps.connected(account, name)
-        assert runtime.store.plugins_for(bot.id) == []
+        assert await runtime.store.plugins_for(bot.id) == []
         assert calls[-1] == "refresh_token"
         server.apps.save(account, name, token)
 
@@ -521,7 +521,7 @@ async def test_app_connection_is_private_refreshes_and_revokes(accounts, monkeyp
     assert calls[-1] == "revoke"
     assert (await alice.get(callback, params={**params, "state": next_state})).status_code == 400
     assert server.apps.credential(account, name) is None
-    assert runtime.store.plugins_for(bot.id) == []
+    assert await runtime.store.plugins_for(bot.id) == []
 
 
 async def test_web_runs_and_streams_are_owned_by_the_signed_in_account(accounts):

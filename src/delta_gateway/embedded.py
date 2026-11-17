@@ -137,7 +137,7 @@ class EmbeddedClient:
 
         async def run(_call_id, arguments, signal=None, on_update=None):
             name = arguments.get("name")
-            current = self.plugin_definitions()
+            current = await self.plugin_definitions()
             if not isinstance(name, str) or name not in current:
                 return fault("App is not connected and enabled for this bot")
             if name not in loaded:
@@ -180,7 +180,7 @@ class EmbeddedClient:
             provider, name, model = (self.make_provider or default_provider)(self.config)
             if self.budget is not None:
                 provider = self.budget.wrap(provider, name)
-            available = self.plugin_definitions() if self.plugin_definitions else {}
+            available = await self.plugin_definitions() if self.plugin_definitions else {}
             host = HostTools(list(self.definitions)) if self.definitions or available else None
             tools = [*computer_tools(self.computer), *(host.specs() if host else [])]
             if available:

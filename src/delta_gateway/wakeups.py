@@ -79,3 +79,20 @@ def interrupted(db, instance, now):
         "AND jobs.id=job_wakeups.job AND jobs.running=1 AND jobs.last_run=job_wakeups.claimed)",
         (now, instance),
     )
+
+
+async def automation_on(db, instance):
+    """enabled() for the shared database interface."""
+    rows = await db.query("SELECT enabled FROM job_automation WHERE instance=?", (instance,))
+    return bool(rows[0]["enabled"]) if rows else True
+
+
+async def mark_interrupted(db, instance, now):
+    """interrupted() for the shared database interface."""
+    await db.run(
+        "UPDATE job_wakeups SET status='interrupted',finished=? "
+        "WHERE instance=? AND status='running' "
+        "AND NOT EXISTS (SELECT 1 FROM jobs WHERE jobs.instance=job_wakeups.instance "
+        "AND jobs.id=job_wakeups.job AND jobs.running=1 AND jobs.last_run=job_wakeups.claimed)",
+        (now, instance),
+    )

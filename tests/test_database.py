@@ -115,3 +115,12 @@ def test_sqlite_chosen_without_d1_id(tmp_path):
 
 def test_d1_chosen_with_all_variables(tmp_path):
     assert isinstance(create_database(config(tmp_path), D1_ENV), D1Database)
+
+
+async def test_constraint_failure_is_one_error_on_both_backends(database):
+    from delta_gateway.database import ConstraintError
+
+    await database.run("CREATE TABLE items (id TEXT PRIMARY KEY)")
+    await database.run("INSERT INTO items (id) VALUES (?)", ["a"])
+    with pytest.raises(ConstraintError, match="UNIQUE"):
+        await database.run("INSERT INTO items (id) VALUES (?)", ["a"])

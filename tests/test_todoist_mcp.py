@@ -239,4 +239,4 @@ async def test_todoist_oauth_binds_resource_rotates_and_revokes(accounts, monkey
     ).fetchone()[0]
     assert b"new-access" not in sealed and b"new-refresh" not in sealed
     assert (await alice.delete(route)).json() == {"connected": False, "providerRevoked": True}
-    assert runtime.store.plugins_for(bot.id) == [] and calls[-1] == "revoke"
+    assert await runtime.store.plugins_for(bot.id) == [] and calls[-1] == "revoke"

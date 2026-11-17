@@ -26,11 +26,11 @@ async def populated(root, name):
         with store.db:
             save_profile(store, bot, {"style": "upbeat"})
         record_chat(store, bot.id, "assistant", name)
-        store.set_plugin(bot.id, "github", True)
+        await store.set_plugin(bot.id, "github", True)
         now = time.time()
-        job = store.add_job(11, 11, 11, 0, bot.id, name, "once", now)
-        store.add_task(11, 11, 11, 0, bot.id, name, "deny", False)
-        store.begin_delegation(route.id, bot, name)
+        job = await store.add_job(11, 11, 11, 0, bot.id, name, "once", now)
+        await store.add_task(11, 11, 11, 0, bot.id, name, "deny", False)
+        await store.begin_delegation(route.id, bot, name)
         with store.db:
             store.db.execute("UPDATE jobs SET running=1 WHERE id=?", (job,))
             for status, previous in (("superseded", None), ("active", 1)):
@@ -73,9 +73,9 @@ async def test_populated_instances_keep_bot_identity_and_remap_database_referenc
         try:
             assert {bot.id for bot in await store.bots()} == {chief_id, bot_id}
             assert profile(store, await store.bot(bot_id))["style"] == "upbeat"
-            assert store.plugins_for(bot_id) == ["github"]
-            assert store.jobs()[0].last_status == "interrupted"
-            assert store.tasks()[0].status == "interrupted"
+            assert await store.plugins_for(bot_id) == ["github"]
+            assert (await store.jobs())[0].last_status == "interrupted"
+            assert (await store.tasks())[0].status == "interrupted"
             route = await store.conversation(11, 11)
             assert route.bot == bot_id
             assert (

@@ -93,14 +93,14 @@ class SessionManager:
         self.computers[bot.id] = computer
         return computer
 
-    def enabled_plugins(self, bot):
+    async def enabled_plugins(self, bot):
         return tuple(
             name
-            for name in self.store.plugins_for(bot.id)
+            for name in await self.store.plugins_for(bot.id)
             if name in PLUGINS and self.plugin_available(name)
         )
 
-    def signature(self, bot):
+    async def signature(self, bot):
         settings = profile(self.store, bot)
         from delta_gateway.bot_skills import load_bot_skills
         from delta_gateway.skill_store import NOTES
@@ -125,15 +125,15 @@ class SessionManager:
             notes,
             skills,
             revision,
-            self.enabled_plugins(bot),
+            await self.enabled_plugins(bot),
         )
 
-    def client(self, bot, session_file=None, *, policy=None, overrides=None):
+    async def client(self, bot, session_file=None, *, policy=None, overrides=None):
         computer = self.computer_for(bot)
         prepared = prepare(self.config, bot, memory_path=computer.memory_path)
 
-        def plugin_definitions():
-            return {name: PLUGINS[name].tools for name in self.enabled_plugins(bot)}
+        async def plugin_definitions():
+            return {name: PLUGINS[name].tools for name in await self.enabled_plugins(bot)}
 
         settings = profile(self.store, bot)
         prepared.addition += "\n\nSpeaking style\n" + STYLES[settings["style"]]
@@ -158,7 +158,7 @@ class SessionManager:
             review_durable=DURABLE_REVIEW.get(),
             grace=self.config.shutdown_timeout,
         )
-        client.bot_signature = self.signature(bot)
+        client.bot_signature = await self.signature(bot)
         return client
 
     async def client_for(self, route, *, fresh_if_missing=False):
@@ -172,7 +172,7 @@ class SessionManager:
             identity = self.identity(current)
             bot = await self.store.bot(current.bot)
             client = self.clients.get(identity)
-            if client and not client.failure and client.bot_signature == self.signature(bot):
+            if client and not client.failure and client.bot_signature == await self.signature(bot):
                 await self.store.persist_route(current, client.state)
                 return client
             if client:
@@ -183,7 +183,7 @@ class SessionManager:
                     if old not in self.busy:
                         await self.clients.pop(old).close()
                         break
-            client = self.client(
+            client = await self.client(
                 bot,
                 current.session_file,
                 overrides=dict(
@@ -218,7 +218,7 @@ class SessionManager:
                 if cached.computer is self.computer_for(bot):
                     await cached.close()
                     self.clients.pop(identity, None)
-            client = self.client(
+            client = await self.client(
                 bot, saved_session(self.store, bot.id) if persist else None, policy=policy
             )
             await client.start()

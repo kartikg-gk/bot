@@ -437,7 +437,7 @@ class AppConnections:
                         {
                             "id": bot.id,
                             "name": bot.name,
-                            "enabled": name in self.server.service.store.plugins_for(bot.id),
+                            "enabled": name in await self.server.service.store.plugins_for(bot.id),
                         }
                         for bot in bots
                     ],
@@ -723,5 +723,5 @@ class AppConnections:
                 raise web.HTTPNotFound(text="Unknown bot")
             if body["enabled"] and not self.connected(account, name):
                 raise web.HTTPConflict(text=f"Connect {name} before granting bot access")
-            store.set_plugin(bot.id, name, body["enabled"])
+            await store.set_plugin(bot.id, name, body["enabled"])
         return web.json_response(body)

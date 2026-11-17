@@ -34,8 +34,8 @@ async def test_web_only_init_runtime_jobs_and_open_stream_shutdown(tmp_path, mon
     service = Service(c, None, factory="tests.fake_session:create")
     await service.store.admit([update(1, "Pending Telegram message", user=1)], c)
     bot = (await service.store.bots())[0].id
-    telegram_job = service.store.add_job(1, 1, 1, 0, bot, "Telegram job", "once", 0)
-    web_job = service.store.add_job(WEB_CHAT, 1, 1, 0, bot, "Web job", "once", 0)
+    telegram_job = await service.store.add_job(1, 1, 1, 0, bot, "Telegram job", "once", 0)
+    web_job = await service.store.add_job(WEB_CHAT, 1, 1, 0, bot, "Web job", "once", 0)
     ready = asyncio.Event()
     service.on_ready = ready.set
     runner = asyncio.create_task(service.run())
@@ -50,9 +50,9 @@ async def test_web_only_init_runtime_jobs_and_open_stream_shutdown(tmp_path, mon
             assert response.status_code == 202
             await asyncio.wait_for(asyncio.gather(*service.jobs.values()), 5)
             async with asyncio.timeout(5):
-                while service.store.job(web_job).last_status != "completed":
+                while (await service.store.job(web_job)).last_status != "completed":
                     await asyncio.sleep(0.02)
-            assert service.store.job(telegram_job).status == "active"
+            assert (await service.store.job(telegram_job)).status == "active"
             assert await service.store.is_pending(1)
             history = (await client.get("/api/messages")).json()
             assert any("turn" in row["text"] for row in history if row["direction"] == "outbound")
