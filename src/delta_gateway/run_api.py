@@ -5,6 +5,7 @@ import json
 
 from aiohttp import web
 
+from delta_gateway.hosted_runs import parse_conversation
 from delta_gateway.web import WEB_CHAT, WEB_IDS, ResourceScope
 
 
@@ -34,8 +35,12 @@ class RunAPI(ResourceScope):
             body = await request.json()
         except ValueError:
             raise web.HTTPBadRequest(text="Send a JSON run request") from None
-        if not isinstance(body, dict) or set(body) - {"text", "bot"}:
+        if not isinstance(body, dict) or set(body) - {"text", "bot", "conversation"}:
             raise web.HTTPBadRequest(text="Provide text and an optional bot ID")
+        try:
+            conversation = parse_conversation(body.get("conversation"))
+        except ValueError as error:
+            raise web.HTTPBadRequest(text=str(error)) from None
         text = body.get("text")
         if not isinstance(text, str) or not text.strip() or len(text) > 16000:
             raise web.HTTPBadRequest(text="Send text up to 16000 characters")
@@ -52,7 +57,7 @@ class RunAPI(ResourceScope):
         if self.server.needs_model(request):
             raise web.HTTPConflict(text="Choose a model and API key in Account settings")
         route = await self.journal.route(WEB_CHAT, self.server.actor, bot)
-        run, _ = await self.journal.queue(route, text, WEB_IDS)
+        run, _ = await self.journal.queue(route, text, WEB_IDS, conversation)
         await self.service.dispatch()
         if "text/event-stream" in request.headers.get("Accept", ""):
             return await self.follow(request, run, 0)

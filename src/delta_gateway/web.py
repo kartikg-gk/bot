@@ -386,6 +386,12 @@ class WebServer:
         text = body.get("text") if isinstance(body, dict) else None
         if not isinstance(text, str) or not text.strip() or len(text) > 16000:
             return web.json_response(dict(error="Send text up to 16000 characters"), status=400)
+        from delta_gateway.hosted_runs import parse_conversation
+
+        try:
+            conversation = parse_conversation(body.get("conversation"))
+        except ValueError as error:
+            return web.json_response(dict(error=str(error)), status=400)
         if self.needs_model(request):
             return web.json_response(
                 dict(error="Choose a model and API key in Account settings"), status=409
@@ -393,7 +399,7 @@ class WebServer:
         text = text.strip()
         if not text.startswith("/") or text.startswith("/skill:"):
             route = await self.service.store.conversation(WEB_CHAT, self.actor)
-            run, number = await self.service.runs.queue(route, text, WEB_IDS)
+            run, number = await self.service.runs.queue(route, text, WEB_IDS, conversation)
         else:
             run = None
             number = await self.service.store.admit_web(WEB_CHAT, self.actor, text, base=WEB_IDS)

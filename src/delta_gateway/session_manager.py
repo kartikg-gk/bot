@@ -270,6 +270,7 @@ class SessionManager:
         before_send=None,
         behavior=None,
         abort_on_error=False,
+        seed=None,
     ):
         # Resolve aliases before locking, then recheck after a session-changing operation.
         while True:
@@ -288,6 +289,9 @@ class SessionManager:
             client = await self.client_for(route)
             self.busy.add(self.identity(await self.store.get_route(route.id)))
             client.clear_events()
+            if seed is not None:
+                # A hosted run starts from exactly the earlier messages the browser sent.
+                client.server.session.harness.set_messages(list(seed))
             arguments = dict(message=text)
             if behavior:
                 arguments["streamingBehavior"] = behavior
@@ -427,6 +431,19 @@ class SessionManager:
             computer = self.computer_for(bot)
             await computer.remove()
             self.computers.pop(bot.id, None)
+
+    async def fresh(self, route):
+        """Forget the route's session so the next prompt starts a new one."""
+        client = self.clients.pop(self.identity(route), None)
+        if client is not None:
+            await client.close()
+        current = await self.store.get_route(route.id)
+        if current and current.session_file:
+            Path(current.session_file).unlink(missing_ok=True)
+        await self.store.shared.run(
+            "UPDATE routes SET session=NULL,session_file=NULL,title=NULL WHERE instance=? AND id=?",
+            (self.store.instance, route.id),
+        )
 
     async def restart_idle(self, bot_id=None):
         """Close idle engines so changed tool grants apply on their next start."""

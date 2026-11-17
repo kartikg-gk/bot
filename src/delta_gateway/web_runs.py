@@ -6,6 +6,9 @@ import time
 from collections import defaultdict
 from uuid import uuid4
 
+from delta_gateway.file_tables import hosted
+from delta_gateway.hosted_runs import save_context
+
 ACTIVE = ("pending", "prompt", "scheduled", "dispatching", "running", "delivering", "cancelling")
 RUN_STATUS = {
     "pending": "queued",
@@ -66,12 +69,14 @@ class RunJournal:
             route = await self.store.get_route(route.id)
         return route
 
-    async def queue(self, route, text, base):
+    async def queue(self, route, text, base, conversation=None):
         await self.ready()
         run = uuid4().hex
         inbox = await self.store.admit_web(
             route.chat, route.user, text, base=base, route=route, run=run
         )
+        if conversation and hosted(self.store):
+            await save_context(self.store, inbox, conversation)
         return run, inbox
 
     async def _rows(self, condition, parameters):

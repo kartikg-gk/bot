@@ -271,10 +271,21 @@ function renderReply(box, text, html) {
 function add(text, you, id, html) {
   const box = document.createElement("div");
   box.className = "message" + (you ? " you" : "");
+  box.dataset.role = you ? "user" : "assistant";
+  box.dataset.text = text;
   renderReply(box, text, you ? undefined : html);
   log.insertBefore(box, drafts.isConnected ? drafts : null);
   if (id) shown.set(id, box);
   log.scrollTop = log.scrollHeight;
+  return box;
+}
+
+// A hosted gateway keeps no session, so each message carries the recent conversation.
+function earlierMessages() {
+  return [...log.querySelectorAll(".message[data-role]")].slice(-20).map((box) => ({
+    role: box.dataset.role,
+    content: box.dataset.text.slice(0, 4000),
+  }));
 }
 
 let runControlsVersion = 0;
@@ -484,12 +495,16 @@ document.getElementById("compose").onsubmit = async (event) => {
   const text = field.value.trim();
   if (!text) return;
   field.value = "";
+  const conversation = earlierMessages();
   add(text, true);
   document.getElementById("bot-avatar").classList.add("working");
-  const response = await api("/api/messages", { method: "POST", body: JSON.stringify({ text }) });
+  const response = await api("/api/messages", {
+    method: "POST",
+    body: JSON.stringify({ text, conversation }),
+  });
   if (!response.ok) {
     document.getElementById("bot-avatar").classList.remove("working");
-    add("Not sent: " + (await response.json()).error, false);
+    delete add("Not sent: " + (await response.json()).error, false).dataset.role;
   } else {
     await loadRunControls();
   }

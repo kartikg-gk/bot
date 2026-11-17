@@ -12,6 +12,8 @@ from delta_gateway.bots import bot_root, workspace
 from delta_gateway.budget import ModelBudget, budgeted, operation
 from delta_gateway.commands import split
 from delta_gateway.errors import RequestRejected, WorkerLost
+from delta_gateway.file_tables import hosted
+from delta_gateway.hosted_runs import entries, take_context
 from delta_gateway.mem0_extract import Mem0Extractor
 from delta_gateway.mem0_extract import apply as apply_mem0
 from delta_gateway.memory import (
@@ -374,6 +376,12 @@ class Service:
                     return
                 await preview.update("Working…", force=True)
                 message = item.text if text is None else text
+                seed = None
+                if hosted(self.store):
+                    # Hosted runs keep no session: start fresh from what the browser sent.
+                    seed = entries(await take_context(self.store, item.id))
+                    await self.sessions.fresh(route)
+                    route = await self.store.get_route(route.id)
                 bot = await self.store.bot((await self.store.get_route(route.id)).bot)
                 # Agent reports carry another model's output; they are never remembered.
                 owner = (
@@ -393,6 +401,7 @@ class Service:
                     accepted=accepted,
                     behavior=behavior,
                     abort_on_error=bool(run),
+                    seed=seed,
                 )
                 await self.store.mark(item.id, "delivering")
                 final = final or f"Run {outcome}; no assistant text returned."
