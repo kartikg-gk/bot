@@ -46,7 +46,7 @@ class RunAPI(ResourceScope):
         if "bot" in body:
             if not isinstance(body["bot"], str):
                 raise web.HTTPBadRequest(text="Send a bot ID")
-            bot = self.store.bot(body["bot"])
+            bot = await self.store.bot(body["bot"])
             if bot is None or bot.temporary:
                 raise web.HTTPNotFound(text="Unknown bot")
         if self.server.needs_model(request):

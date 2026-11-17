@@ -6,19 +6,19 @@ from tests.test_web import web as web
 
 async def test_delete_does_not_redirect_queued_message_to_chief(web):
     service, client, _ = web
-    bot = service.store.create_bot("Queued", "Keep this work separate")
+    bot = await service.store.create_bot("Queued", "Keep this work separate")
     route = service.store.conversation(WEB_CHAT, service.web.actor)
     await service.sessions.switch_bot(route, bot)
     service.store.admit_web(WEB_CHAT, service.web.actor, "Work for this bot", base=WEB_IDS)
     response = await client.delete("/api/bots/" + bot.id)
     assert response.status_code == 409
-    assert service.store.bot(bot.id) == bot
+    assert await service.store.bot(bot.id) == bot
     assert service.store.get_route(route.id).bot == bot.id
 
 
 async def test_own_instruction_update_invalidates_saved_greeting(web):
     service, _, _ = web
-    bot = service.store.create_bot("Reader", "Read documents")
+    bot = await service.store.create_bot("Reader", "Read documents")
     with service.store.db:
         save_profile(service.store, bot, {})
         service.store.db.execute(

@@ -1,5 +1,6 @@
 """Operator commands for shared and bot-local skill folders."""
 
+import asyncio
 import json
 
 from delta_gateway.bot_skills import load_bot_skills
@@ -16,7 +17,7 @@ def command(config, options):
     try:
         bot = None
         if options.bot:
-            bot = store.bot(options.bot) or store.find_bot(options.bot)
+            bot = asyncio.run(store.bot(options.bot)) or asyncio.run(store.find_bot(options.bot))
             if bot is None:
                 raise OperatorError("No bot with that name or ID")
         root = bot_root(config, bot) / "skills" if bot else config.state / "skills"

@@ -53,7 +53,11 @@ async def run_task(config, text, *, bot_name=None, account=None, deadline=120, f
 @traced("one-shot")
 async def execute(service, text, bot_name, deadline):
     store = service.store
-    bot = (store.bot(bot_name) or store.find_bot(bot_name)) if bot_name else store.bots()[0]
+    bot = (
+        (await store.bot(bot_name) or await store.find_bot(bot_name))
+        if bot_name
+        else (await store.bots())[0]
+    )
     if bot is None or bot.temporary:
         raise OperatorError("Unknown persistent bot")
     actor = service.config.users[0]

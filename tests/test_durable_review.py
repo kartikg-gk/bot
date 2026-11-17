@@ -172,7 +172,7 @@ async def test_review_context_restored_when_client_creation_fails(tmp_path):
     from tests.test_gateway import config
 
     manager = SessionManager(config(tmp_path), Store(tmp_path / "state", "a" * 32))
-    bot = manager.store.create_bot("Reader", "Read documents")
+    bot = await manager.store.create_bot("Reader", "Read documents")
 
     def broken(*args, **kwargs):
         raise ValueError("Workspace unavailable")

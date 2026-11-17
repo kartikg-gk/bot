@@ -256,7 +256,7 @@ async def test_episode_is_written_only_when_the_check_says_so(service):
         )
     )
     await say(service, c, 2, "fix login")
-    chief = service.project_of(service.store.bots()[0])
+    chief = service.project_of((await service.store.bots())[0])
     assert [f.text[:15] for f in service.memory.facts(chief, 11, kind="episode")] == [
         "Goal: Fix login"
     ]
@@ -264,7 +264,7 @@ async def test_episode_is_written_only_when_the_check_says_so(service):
 
 async def test_unsure_update_tells_the_user_and_keep_settles_it(service):
     service, c, telegram = service
-    chief = service.project_of(service.store.bots()[0])
+    chief = service.project_of((await service.store.bots())[0])
     old = service.memory.add(
         chief, 11, "fact", "Billing service runs on Postgres", source="explicit"
     )

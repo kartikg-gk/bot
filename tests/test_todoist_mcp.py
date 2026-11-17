@@ -226,7 +226,7 @@ async def test_todoist_oauth_binds_resource_rotates_and_revokes(accounts, monkey
     assert (await alice.get(callback, params=params)).status_code == 400
     account = server.google.identity(alice.cookies["delta_session"])
     runtime = server.runtimes.get(account)
-    bot = runtime.store.create_bot("Todoist reader", "Find tasks")
+    bot = await runtime.store.create_bot("Todoist reader", "Find tasks")
     grant = route + f"/bots/{bot.id}"
     assert (await bob.put(grant, json={"enabled": True})).status_code == 404
     assert (await alice.put(grant, json={"enabled": True})).status_code == 200

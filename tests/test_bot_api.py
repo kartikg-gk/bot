@@ -27,12 +27,12 @@ async def test_bot_crud_profile_and_chief_protection(web):
     assert (await client.delete("/api/bots/" + chief["id"])).status_code == 409
     assert (await client.patch(path, json={"color": "bad"})).status_code == 400
     assert (await client.delete(path)).status_code == 200
-    assert service.store.bot(bot["id"]) is None
+    assert await service.store.bot(bot["id"]) is None
 
 
 async def test_delegation_can_be_followed_in_bot_chat(web):
     service, client, _ = web
-    bot = service.store.create_bot("Reader", "Read documents")
+    bot = await service.store.create_bot("Reader", "Read documents")
     answer, outcome = await service.sessions.delegate(bot, "First question", policy="deny")
     assert outcome == "completed"
     assert "turn 1" in answer
@@ -50,8 +50,8 @@ async def test_delegation_can_be_followed_in_bot_chat(web):
 
 async def test_busy_bot_cannot_be_edited_and_other_bots_still_run(web):
     service, client, _ = web
-    bot = service.store.create_bot("Reader", "Read documents")
-    other = service.store.create_bot("Other", "Different workspace")
+    bot = await service.store.create_bot("Reader", "Read documents")
+    other = await service.store.create_bot("Other", "Different workspace")
     task = asyncio.create_task(service.sessions.delegate(bot, "slow", policy="deny"))
     try:
         async with asyncio.timeout(5):
@@ -68,7 +68,7 @@ async def test_busy_bot_cannot_be_edited_and_other_bots_still_run(web):
 
 async def test_greeting_is_generated_and_cached(web):
     service, client, _ = web
-    bot = service.store.create_bot("Reader", "Read documents")
+    bot = await service.store.create_bot("Reader", "Read documents")
     path = "/api/bots/" + bot.id + "/greeting"
     first = await client.post(path)
     assert first.status_code == 200 and first.json()["text"]
@@ -82,8 +82,8 @@ async def test_export_includes_older_messages_and_only_the_requested_bot(web):
     from delta_gateway.bot_profiles import record_chat
 
     service, client, _ = web
-    bot = service.store.create_bot("Reader", "Read documents")
-    other = service.store.create_bot("Other", "Different workspace")
+    bot = await service.store.create_bot("Reader", "Read documents")
+    other = await service.store.create_bot("Other", "Different workspace")
     for number in range(201):
         record_chat(service.store, bot.id, "user", f"Question {number}")
     record_chat(service.store, other.id, "user", "Other bot")
@@ -100,8 +100,8 @@ async def test_reply_counts_exclude_prompts_and_count_each_bot(web):
     from delta_gateway.bot_profiles import record_chat
 
     service, client, _ = web
-    bot = service.store.create_bot("Reader", "Read documents")
-    other = service.store.create_bot("Other", "Different workspace")
+    bot = await service.store.create_bot("Reader", "Read documents")
+    other = await service.store.create_bot("Other", "Different workspace")
     record_chat(service.store, bot.id, "user", "Prompt")
     record_chat(service.store, bot.id, "assistant", "Answer")
     record_chat(service.store, bot.id, "assistant", "Follow-up")

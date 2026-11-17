@@ -15,21 +15,21 @@ def store(tmp_path):
     result.close()
 
 
-def test_new_instance_has_one_chief(store):
-    bots = store.bots()
+async def test_new_instance_has_one_chief(store):
+    bots = await store.bots()
     assert [bot.name for bot in bots] == ["Chief of Staff"] and bots[0].chief
     assert store.conversation(1, 1).bot == bots[0].id
 
 
-def test_bot_names_are_unique_regardless_of_case(store):
-    store.create_bot("Researcher", "Finds things")
+async def test_bot_names_are_unique_regardless_of_case(store):
+    await store.create_bot("Researcher", "Finds things")
     with pytest.raises(ValueError):
-        store.create_bot("researcher", "Other")
+        await store.create_bot("researcher", "Other")
 
 
-def test_switching_keeps_each_bots_session(store):
-    other = store.create_bot("Researcher", "Finds things")
-    chief = store.bots()[0]
+async def test_switching_keeps_each_bots_session(store):
+    other = await store.create_bot("Researcher", "Finds things")
+    chief = (await store.bots())[0]
     route = store.conversation(1, 1)
     store.persist_route(route, dict(sessionId="s1", sessionFile="s1.jsonl", thinkingLevel="off"))
     route = store.switch_bot(route, other)
@@ -41,7 +41,7 @@ def test_switching_keeps_each_bots_session(store):
     assert route.session == "s2"
 
 
-def test_version_four_database_upgrades(tmp_path):
+async def test_version_four_database_upgrades(tmp_path):
     path = tmp_path / "state" / "gateway.sqlite3"
     Store(tmp_path / "state", "a" * 32).close()
     db = sqlite3.connect(path)
@@ -61,20 +61,20 @@ def test_version_four_database_upgrades(tmp_path):
     store = Store(tmp_path / "state", "a" * 32)
     try:
         route = store.conversation(1, 1)
-        assert route.session == "old" and route.bot == store.bots()[0].id
+        assert route.session == "old" and route.bot == (await store.bots())[0].id
     finally:
         store.close()
 
 
-def test_prepare_separates_bot_files(tmp_path, store):
+async def test_prepare_separates_bot_files(tmp_path, store):
     c = config(tmp_path)
-    worker = store.create_bot("Researcher", "Finds things")
+    worker = await store.create_bot("Researcher", "Finds things")
     prepared = prepare(c, worker)
     assert prepared.project == c.state / "bots" / worker.id / "workspace"
     assert prepared.project.is_dir()
     assert "KNOWLEDGE.md" in prepared.addition
     assert "You are Researcher" in prepared.addition
-    assert prepare(c, store.bots()[0]).project == c.project
+    assert prepare(c, (await store.bots())[0]).project == c.project
 
 
 async def run(service, c, identifier, text):
@@ -92,7 +92,7 @@ async def test_bot_commands_through_service(tmp_path):
         await run(service, c, 2, "/bot new Researcher | Finds things")
         await run(service, c, 3, "/bot researcher")
         route = service.store.conversation(11, 11)
-        assert service.store.bot(route.bot).name == "Researcher" and route.session is None
+        assert (await service.store.bot(route.bot)).name == "Researcher" and route.session is None
         await run(service, c, 4, "second")
         assert service.store.conversation(11, 11).session
         await run(service, c, 5, "/bot")

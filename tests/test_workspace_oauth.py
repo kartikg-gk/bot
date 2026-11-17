@@ -95,7 +95,7 @@ async def test_workspace_oauth_is_private_rotates_on_401_and_revokes(accounts, m
     assert (await alice.get(callback, params=params)).status_code == 400
     principal = server.google.identity(alice.cookies["delta_session"])
     runtime = server.runtimes.get(principal)
-    bot = runtime.store.create_bot("Workspace", "Use reviewed actions")
+    bot = await runtime.store.create_bot("Workspace", "Use reviewed actions")
     grant = route + f"/bots/{bot.id}"
     assert (await bob.put(grant, json={"enabled": True})).status_code == 404
     tool = "notion_search" if name == "notion" else "linear_list_teams"

@@ -229,7 +229,7 @@ async def test_wispr_registration_browser_binding_rotation_and_local_disconnect(
     assert (await alice.get(callback, params=params)).status_code == 400
     principal = server.google.identity(alice.cookies["delta_session"])
     runtime = server.runtimes.get(principal)
-    bot = runtime.store.create_bot("Meeting reader", "Find meeting notes")
+    bot = await runtime.store.create_bot("Meeting reader", "Find meeting notes")
     grant = route + f"/bots/{bot.id}"
     assert (await bob.put(grant, json={"enabled": True})).status_code == 404
     with pytest.raises(ValueError, match="not enabled"):

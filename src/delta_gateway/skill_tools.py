@@ -48,7 +48,7 @@ NAMES = {tool["name"] for tool in TOOLS}
 
 
 async def run(sessions, bot, name, arguments):
-    if bot is None or sessions.store.bot(bot.id) is None:
+    if bot is None or await sessions.store.bot(bot.id) is None:
         raise ValueError("A named bot is required")
     root = bot_root(sessions.config, bot)
     if name == "write_skill":

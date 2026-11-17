@@ -28,7 +28,7 @@ async def test_three_independent_conversations_can_run_by_default(tmp_path):
         service.store.admit([update(n, "pause", user=user) for n, user in enumerate(c.users, 1)], c)
         for user in c.users:
             route = service.store.conversation(user, user)
-            bot = service.store.create_bot(f"Helper {user}", "Handle this user's requests")
+            bot = await service.store.create_bot(f"Helper {user}", "Handle this user's requests")
             service.store.switch_bot(route, bot)
         await service.dispatch()
         async with asyncio.timeout(15):

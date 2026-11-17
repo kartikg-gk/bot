@@ -17,7 +17,7 @@ async def wait_working(sessions, bot):
 async def test_foreground_and_delegation_share_bot_reservation(web):
     service, _, _ = web
     manager = service.sessions
-    bot = service.store.create_bot("Reader", "Read documents")
+    bot = await service.store.create_bot("Reader", "Read documents")
     route = service.store.conversation(11, 11)
     route = service.store.switch_bot(route, bot)
     foreground = asyncio.create_task(manager.prompt(route, "slow"))
@@ -49,7 +49,7 @@ async def test_bot_reservation_excludes_another_manager(web):
     from delta_gateway.session_manager import SessionManager
 
     other = SessionManager(service.config, service.store)
-    bot = service.store.bots()[0]
+    bot = (await service.store.bots())[0]
     with reserve(service.sessions, bot.id):
         with pytest.raises(RuntimeError, match="already owned"):
             with reserve(other, bot.id):
@@ -61,16 +61,16 @@ async def test_bot_reservation_excludes_another_manager(web):
 async def test_self_update_reloads_cached_engine_and_only_changes_self(web):
     service, _, _ = web
     manager = service.sessions
-    bot = service.store.create_bot("Reader", "Old purpose")
-    chief = service.store.bots()[0]
+    bot = await service.store.create_bot("Reader", "Old purpose")
+    chief = (await service.store.bots())[0]
     route = service.store.switch_bot(service.store.conversation(11, 11), bot)
     await manager.prompt(route, "hello")
     before = next(iter(manager.clients.values()))
     await Team(service.store, manager).run(
         "update_own_bot", {"instructions": "Cite primary sources."}, route, bot=bot
     )
-    assert service.store.bot(chief.id).instructions == chief.instructions
-    assert service.store.bot(bot.id).instructions == "Cite primary sources."
+    assert (await service.store.bot(chief.id)).instructions == chief.instructions
+    assert (await service.store.bot(bot.id)).instructions == "Cite primary sources."
     await manager.prompt(route, "again")
     after = next(iter(manager.clients.values()))
     assert after is not before
@@ -79,7 +79,7 @@ async def test_self_update_reloads_cached_engine_and_only_changes_self(web):
 
 async def test_failed_computer_removal_preserves_bot_and_history(web):
     service, client, _ = web
-    bot = service.store.create_bot("Reader", "Read documents")
+    bot = await service.store.create_bot("Reader", "Read documents")
     computer = service.sessions.computer_for(bot)
 
     async def broken():
@@ -88,13 +88,13 @@ async def test_failed_computer_removal_preserves_bot_and_history(web):
     computer.remove = broken
     response = await client.delete("/api/bots/" + bot.id)
     assert response.status_code == 409
-    assert service.store.bot(bot.id) == bot
+    assert await service.store.bot(bot.id) == bot
 
 
 async def test_profiles_survive_reopen_and_defaults_differ(web):
     service, _, _ = web
-    bot = service.store.create_bot("Reader", "Read documents")
-    chief = service.store.bots()[0]
+    bot = await service.store.create_bot("Reader", "Read documents")
+    chief = (await service.store.bots())[0]
     assert profile(service.store, chief)["color"] != profile(service.store, bot)["color"]
     with service.store.db:
         save_profile(service.store, bot, {"style": "thoughtful", "shape": "diamond"})
@@ -108,7 +108,7 @@ async def test_profiles_survive_reopen_and_defaults_differ(web):
 
 async def test_greeting_does_not_replace_delegated_session(web):
     service, client, _ = web
-    bot = service.store.create_bot("Reader", "Read documents")
+    bot = await service.store.create_bot("Reader", "Read documents")
     await service.sessions.delegate(bot, "First task", policy="deny")
     original = saved_session(service.store, bot.id)
     assert (await client.post("/api/bots/" + bot.id + "/greeting")).status_code == 200
@@ -119,11 +119,11 @@ async def test_greeting_does_not_replace_delegated_session(web):
 
 async def test_rename_collision_rolls_back_profile_and_busy_delete_is_refused(web):
     service, client, _ = web
-    bot = service.store.create_bot("Reader", "Read documents")
-    service.store.create_bot("Writer", "Write documents")
+    bot = await service.store.create_bot("Reader", "Read documents")
+    await service.store.create_bot("Writer", "Write documents")
     response = await client.patch("/api/bots/" + bot.id, json={"name": "Writer", "style": "upbeat"})
     assert response.status_code == 409
-    assert service.store.bot(bot.id).name == "Reader"
+    assert (await service.store.bot(bot.id)).name == "Reader"
     assert profile(service.store, bot)["style"] == "direct"
     with reserve(service.sessions, bot.id):
         assert (await client.delete("/api/bots/" + bot.id)).status_code == 409

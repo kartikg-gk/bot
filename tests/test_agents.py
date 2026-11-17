@@ -51,8 +51,8 @@ async def test_temporary_agent_is_hidden_and_has_its_own_workspace(setup):
     service, c, _ = setup
     task = await spawn(service)
     await finished(service)
-    bot = service.store.bot(service.store.task(task).bot)
-    assert bot.temporary and bot not in service.store.bots()
+    bot = await service.store.bot(service.store.task(task).bot)
+    assert bot.temporary and bot not in await service.store.bots()
     assert (c.state / "bots" / bot.id / "workspace").is_dir()
 
 
@@ -73,7 +73,7 @@ async def test_writer_needs_a_sandbox(setup):
 
 async def test_named_bot_stays_one_task_at_a_time(setup):
     service, _, _ = setup
-    service.store.create_bot("Researcher", "Finds things")
+    await service.store.create_bot("Researcher", "Finds things")
     await spawn(service, "slow", bot_name="Researcher")
     with pytest.raises(ValueError, match="busy"):
         await spawn(service, bot_name="Researcher")
@@ -126,10 +126,10 @@ async def test_keep_and_discard_temporary_agents(setup):
     gone = await spawn(service)
     await finished(service)
     await command(service, c, 1, f"/keep {kept} Scout")
-    assert service.store.find_bot("Scout").id == service.store.task(kept).bot
+    assert (await service.store.find_bot("Scout")).id == service.store.task(kept).bot
     gone_bot = service.store.task(gone).bot
     await command(service, c, 2, f"/discard {gone}")
-    assert service.store.bot(gone_bot) is None
+    assert await service.store.bot(gone_bot) is None
     assert not (c.state / "bots" / gone_bot).exists()
 
 
@@ -139,12 +139,12 @@ async def test_discard_refuses_a_kept_bot(setup):
     await finished(service)
     await command(service, c, 1, f"/keep {task} Scout")
     await command(service, c, 2, f"/discard {task}")
-    assert service.store.find_bot("Scout")
+    assert await service.store.find_bot("Scout")
 
 
-def test_restart_reports_interrupted_work_once(tmp_path):
+async def test_restart_reports_interrupted_work_once(tmp_path):
     store = Store(tmp_path / "state", "a" * 32)
-    bot = store.create_bot("Agent", "x", temporary=True)
+    bot = await store.create_bot("Agent", "x", temporary=True)
     task = store.add_task(11, 11, 11, 0, bot.id, "goal", "deny", False)
     store.close()
     store = Store(tmp_path / "state", "a" * 32)

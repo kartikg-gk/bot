@@ -64,7 +64,7 @@ async def test_json_result_and_typed_replay(web):
 
 async def test_direct_stream_can_target_unselected_bot(web):
     service, client, _ = web
-    bot = service.store.create_bot("Writer", "Writes notes")
+    bot = await service.store.create_bot("Writer", "Writes notes")
     response = await client.post(
         "/api/runs",
         headers={"Accept": "text/event-stream"},
@@ -80,7 +80,7 @@ async def test_direct_stream_can_target_unselected_bot(web):
 
 async def test_stop_preserves_other_bots_and_queued_messages_and_reload_recovers_review(web):
     service, client, _ = web
-    worker = service.store.create_bot("Reader", "Reads docs")
+    worker = await service.store.create_bot("Reader", "Reads docs")
     slow = await submit(client, "slow", bot=worker.id)
     first = await submit(client, "write")
     review = await wait_for_approval(client, first)

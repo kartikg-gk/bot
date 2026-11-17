@@ -9,6 +9,7 @@ cannot bind NULL: write ``NULLIF(?, '')`` and pass an empty string instead.
 import asyncio
 import os
 import sqlite3
+import threading
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Protocol
@@ -55,17 +56,17 @@ class SqliteDatabase:
             self.path, isolation_level=None, check_same_thread=False, timeout=30
         )
         self.connection.row_factory = sqlite3.Row
-        self.lock = asyncio.Lock()
+        # A thread lock, not an asyncio one, so the file works from any event loop.
+        self.lock = threading.Lock()
 
     def _execute(self, sql, params):
-        before = self.connection.total_changes
-        rows = self.connection.execute(sql, params).fetchall()
-        return [dict(row) for row in rows], self.connection.total_changes - before
+        with self.lock:
+            before = self.connection.total_changes
+            rows = self.connection.execute(sql, params).fetchall()
+            return [dict(row) for row in rows], self.connection.total_changes - before
 
     async def _call(self, sql, params):
-        values = bindable(params)
-        async with self.lock:
-            return await asyncio.to_thread(self._execute, sql, values)
+        return await asyncio.to_thread(self._execute, sql, bindable(params))
 
     async def query(self, sql, params=()):
         return (await self._call(sql, params))[0]
@@ -78,12 +79,19 @@ class SqliteDatabase:
 
     async def sync(self, work):
         """Run ``work(connection)`` in the worker thread, for steps that need sqlite3 itself."""
-        async with self.lock:
-            return await asyncio.to_thread(work, self.connection)
+
+        def locked():
+            with self.lock:
+                return work(self.connection)
+
+        return await asyncio.to_thread(locked)
+
+    def close_now(self):
+        with self.lock:
+            self.connection.close()
 
     async def close(self):
-        async with self.lock:
-            self.connection.close()
+        await asyncio.to_thread(self.close_now)
 
 
 def as_text(value):

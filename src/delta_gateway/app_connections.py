@@ -416,7 +416,7 @@ class AppConnections:
 
     async def list(self, request):
         account = self.identity(request)
-        bots = self.server.service.store.bots()
+        bots = await self.server.service.store.bots()
         saved = set(self.store.names(account, "app"))
         return web.json_response(
             [
@@ -718,7 +718,7 @@ class AppConnections:
             if self.server.account_from_cookie(request) is None:
                 raise web.HTTPUnauthorized(text="Sign in again before changing app access")
             store = self.server.service.store
-            bot = store.bot(request.match_info["bot"])
+            bot = await store.bot(request.match_info["bot"])
             if bot is None or bot.temporary:
                 raise web.HTTPNotFound(text="Unknown bot")
             if body["enabled"] and not self.connected(account, name):

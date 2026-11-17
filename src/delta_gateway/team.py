@@ -165,8 +165,8 @@ class Team:
         self.spawner = self.canceller = None
         self.job_canceller = store.cancel_job
 
-    def teammate(self, name):
-        bot = self.store.find_bot(name)
+    async def teammate(self, name):
+        bot = await self.store.find_bot(name)
         if not bot:
             raise ValueError(f"No bot named {name}. Use list_bots.")
         if bot.chief:
@@ -206,7 +206,7 @@ class Team:
         if name == "update_own_bot":
             if not bot:
                 raise ValueError("A named bot is required")
-            current = self.store.bot(bot.id)
+            current = await self.store.bot(bot.id)
             if current is None:
                 raise ValueError("This bot has been deleted")
             description = arguments.get("description", current.role)
@@ -215,15 +215,15 @@ class Team:
                 raise ValueError("A bot needs a purpose")
             if not isinstance(instructions, str):
                 raise ValueError("Instructions must be text")
-            self.store.update_bot(bot.id, description, instructions)
+            await self.store.update_bot(bot.id, description, instructions)
             return "Saved. The new instructions apply on the next run."
         owner = actor or route.user
         if name == "schedule_job":
-            current = bot or self.store.bots()[0]
+            current = bot or (await self.store.bots())[0]
             requested = arguments.get("bot_name")
             if requested and not current.chief and requested.casefold() != current.name.casefold():
                 raise ValueError("A specialist can only schedule itself")
-            target = self.store.find_bot(requested) if requested else current
+            target = await self.store.find_bot(requested) if requested else current
             if target is None or target.temporary:
                 raise ValueError("Choose a persistent bot")
             identifier = self.schedule(arguments["when"], arguments["task"], target, route, owner)
@@ -233,7 +233,7 @@ class Team:
                 [
                     dict(
                         id=j.id,
-                        bot=getattr(self.store.bot(j.bot), "name", "Deleted bot"),
+                        bot=getattr(await self.store.bot(j.bot), "name", "Deleted bot"),
                         task=j.task,
                         schedule=j.spec,
                         status=j.status,
@@ -252,7 +252,7 @@ class Team:
         if bot and not bot.chief:
             raise ValueError("Only the chief of staff can use this tool.")
         if name in {"spawn_agent", "spawn_writer_agent"}:
-            identifier = self.spawner(
+            identifier = await self.spawner(
                 arguments["goal"],
                 arguments.get("bot_name"),
                 name == "spawn_writer_agent",
@@ -277,17 +277,17 @@ class Team:
             return json.dumps(
                 [
                     dict(name=b.name, description=b.role[:500], you=b.chief)
-                    for b in self.store.bots()
+                    for b in await self.store.bots()
                 ]
             )
         if name == "create_bot":
-            bot = self.store.create_bot(
+            bot = await self.store.create_bot(
                 arguments["name"], arguments["description"], arguments.get("instructions", "")
             )
             return f"Created {bot.name}."
         if name == "update_bot":
-            bot = self.teammate(arguments["name"])
-            self.store.update_bot(
+            bot = await self.teammate(arguments["name"])
+            await self.store.update_bot(
                 bot.id,
                 arguments.get("description", bot.role),
                 arguments.get("instructions", bot.instructions),
@@ -298,7 +298,7 @@ class Team:
         raise ValueError("Unknown tool")
 
     async def delegate(self, name, task, route, event):
-        bot = self.teammate(name)
+        bot = await self.teammate(name)
         record = self.store.begin_delegation(route.id, bot, task)
         answer, status = "", "interrupted"
         try:

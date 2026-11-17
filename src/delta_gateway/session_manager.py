@@ -169,7 +169,7 @@ class SessionManager:
                     raise WorkerLost("Saved session file is missing; use /new")
                 current.session_file = None
             identity = self.identity(current)
-            bot = self.store.bot(current.bot)
+            bot = await self.store.bot(current.bot)
             client = self.clients.get(identity)
             if client and not client.failure and client.bot_signature == self.signature(bot):
                 self.store.persist_route(current, client.state)
@@ -207,7 +207,7 @@ class SessionManager:
         self, bot, task, event=None, policy=None, *, review_durable=None, persist=True
     ):
         """Resume a bot's saved work and return its answer."""
-        bot = self.store.bot(bot.id) or bot
+        bot = await self.store.bot(bot.id) or bot
         review_token = DURABLE_REVIEW.set(
             DURABLE_REVIEW.get() if review_durable is None else review_durable
         )
@@ -428,7 +428,7 @@ class SessionManager:
         """Close idle engines so changed tool grants apply on their next start."""
         for identity, client in list(self.clients.items()):
             if bot_id is not None and client.computer is not self.computer_for(
-                self.store.bot(bot_id)
+                await self.store.bot(bot_id)
             ):
                 continue
             if identity not in self.busy:

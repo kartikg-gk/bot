@@ -88,7 +88,7 @@ async def test_granola_saved_key_is_private_and_reads_notes_and_transcripts(acco
     assert KEY.encode() not in sealed
     principal = server.google.identity(alice.cookies["delta_session"])
     runtime = server.runtimes.get(principal)
-    bot = runtime.store.create_bot("Note reader", "Read meeting notes")
+    bot = await runtime.store.create_bot("Note reader", "Read meeting notes")
     grant = route + f"/bots/{bot.id}"
     assert (await bob.put(grant, json={"enabled": True})).status_code == 404
     with pytest.raises(ValueError, match="not enabled"):

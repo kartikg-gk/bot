@@ -424,7 +424,7 @@ class WebServer:
                 id=t.id,
                 status=t.status,
                 goal=t.goal[:200],
-                bot=getattr(self.service.store.bot(t.bot), "name", "-"),
+                bot=getattr(await self.service.store.bot(t.bot), "name", "-"),
             )
             for t in self.service.store.tasks()
         ]

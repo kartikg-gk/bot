@@ -33,7 +33,7 @@ async def test_web_only_init_runtime_jobs_and_open_stream_shutdown(tmp_path, mon
     assert c.web_only and c.web_port == 0 and c.users == [1] and c.token() is None
     service = Service(c, None, factory="tests.fake_session:create")
     service.store.admit([update(1, "Pending Telegram message", user=1)], c)
-    bot = service.store.bots()[0].id
+    bot = (await service.store.bots())[0].id
     telegram_job = service.store.add_job(1, 1, 1, 0, bot, "Telegram job", "once", 0)
     web_job = service.store.add_job(WEB_CHAT, 1, 1, 0, bot, "Web job", "once", 0)
     ready = asyncio.Event()

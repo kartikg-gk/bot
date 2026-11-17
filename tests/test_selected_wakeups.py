@@ -10,7 +10,7 @@ from tests.test_web import web as web
 
 async def test_event_endpoint_records_delivery_and_honors_master_switch(web):
     service, client, _ = web
-    bot = service.store.bots()[0]
+    bot = (await service.store.bots())[0]
     create = await client.post(
         "/api/jobs", json={"bot": bot.id, "when": "on build.done", "task": "hello"}
     )
@@ -38,11 +38,11 @@ async def test_event_endpoint_records_delivery_and_honors_master_switch(web):
     assert details["wakeups"][0]["status"] == "completed"
 
 
-def test_event_claims_are_actor_scoped_and_interrupted_work_is_not_replayed(tmp_path):
+async def test_event_claims_are_actor_scoped_and_interrupted_work_is_not_replayed(tmp_path):
     c = config(tmp_path)
     store = Store(c.database_path, c.instance)
     now = time.time()
-    bot = store.bots()[0]
+    bot = (await store.bots())[0]
     spec, due = parse_when("on build.done")
     job = store.add_job(11, 11, 11, 0, bot.id, "hello", spec, due)
     store.add_job(22, 22, 22, 0, bot.id, "hello", spec, due)

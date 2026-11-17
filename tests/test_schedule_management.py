@@ -7,12 +7,12 @@ from delta_gateway.store import MAX_ACTIVE_JOBS, Store
 from tests.test_web import web as web
 
 
-def test_scheduler_renewal_and_takeover_fence_old_completions(tmp_path):
+async def test_scheduler_renewal_and_takeover_fence_old_completions(tmp_path):
     now = time.time()
     original = Store(tmp_path, "a" * 32)
     other = None
     try:
-        bot = original.bots()[0].id
+        bot = (await original.bots())[0].id
         repeat = original.add_job(11, 11, 11, 0, bot, "repeat", "every:60", 0)
         once = original.add_job(11, 11, 11, 0, bot, "once", "once", 0)
         assert original.scheduler_heartbeat("first", now, 10)
@@ -37,10 +37,10 @@ def test_scheduler_renewal_and_takeover_fence_old_completions(tmp_path):
         original.close()
 
 
-def test_pause_preserves_due_time_and_quota_is_per_person(tmp_path):
+async def test_pause_preserves_due_time_and_quota_is_per_person(tmp_path):
     store = Store(tmp_path, "a" * 32)
     try:
-        bot = store.bots()[0].id
+        bot = (await store.bots())[0].id
         first = store.add_job(11, 11, 11, 0, bot, "pause", "every:60", 1000, "skip")
         store.set_job_paused(first, 11, True)
         assert store.claim_due(1500) == []
@@ -61,8 +61,8 @@ def test_pause_preserves_due_time_and_quota_is_per_person(tmp_path):
 
 async def test_specialist_can_schedule_itself_but_cannot_manage_another_persons_job(web):
     service, _, _ = web
-    worker = service.store.create_bot("Reader", "Read documents")
-    other = service.store.create_bot("Writer", "Write documents")
+    worker = await service.store.create_bot("Reader", "Read documents")
+    other = await service.store.create_bot("Writer", "Write documents")
     route = service.store.conversation(11, 11)
     args = dict(when="every 1h", task="Read documents")
     await service.team.run("schedule_job", args, route, actor=11, bot=worker)
@@ -79,7 +79,7 @@ async def test_specialist_can_schedule_itself_but_cannot_manage_another_persons_
 
 async def test_web_job_management_and_result_persistence(web):
     service, client, _ = web
-    chief = service.store.bots()[0]
+    chief = (await service.store.bots())[0]
     hidden = service.store.add_job(22, 22, 22, 0, chief.id, "other actor", "once", 9e9)
     assert (await client.get(f"/api/jobs/{hidden}")).status_code == 404
     assert (await client.post(f"/api/jobs/{hidden}/cancel")).status_code == 404

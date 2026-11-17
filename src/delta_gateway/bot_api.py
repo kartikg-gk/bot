@@ -34,8 +34,8 @@ class BotAPI(ResourceScope):
         app.router.add_post("/api/bots/{bot}/select", self.select)
         app.router.add_post("/api/bots/{bot}/greeting", self.greeting)
 
-    def bot(self, request):
-        bot = self.store.bot(request.match_info["bot"])
+    async def bot(self, request):
+        bot = await self.store.bot(request.match_info["bot"])
         if bot is None:
             raise web.HTTPNotFound(text="Unknown bot")
         return bot
@@ -65,7 +65,7 @@ class BotAPI(ResourceScope):
 
         selected = self.store.conversation(WEB_CHAT, self.server.actor).bot
         return web.json_response(
-            [{**self.view(bot), "selected": bot.id == selected} for bot in self.store.bots()]
+            [{**self.view(bot), "selected": bot.id == selected} for bot in await self.store.bots()]
         )
 
     async def reply_counts(self, request):
@@ -80,7 +80,7 @@ class BotAPI(ResourceScope):
         if not values.get("name") or not values.get("role"):
             raise web.HTTPBadRequest(text="Provide a name and purpose")
         try:
-            bot = self.store.create_bot(
+            bot = await self.store.create_bot(
                 values["name"], values["role"], values.get("instructions", "")
             )
             with self.store.db:
@@ -94,7 +94,7 @@ class BotAPI(ResourceScope):
         return web.json_response(self.view(bot), status=201)
 
     async def update(self, request):
-        bot = self.bot(request)
+        bot = await self.bot(request)
         values = await self.changes(request)
         try:
             with reserve(self.sessions, bot.id):
@@ -123,10 +123,10 @@ class BotAPI(ResourceScope):
                     )
         except (ValueError, RuntimeError, sqlite3.IntegrityError) as error:
             raise web.HTTPConflict(text=str(error)) from None
-        return web.json_response(self.view(self.store.bot(bot.id)))
+        return web.json_response(self.view(await self.store.bot(bot.id)))
 
     async def delete(self, request):
-        bot = self.bot(request)
+        bot = await self.bot(request)
         if bot.chief:
             raise web.HTTPConflict(text="The chief can be edited but cannot be deleted")
         pending = self.store.db.execute(
@@ -177,7 +177,7 @@ class BotAPI(ResourceScope):
                     self.store.db.execute(
                         "UPDATE routes SET bot=?,session=NULL,session_file=NULL"
                         " WHERE instance=? AND bot=?",
-                        (self.store.bots()[0].id, self.store.instance, bot.id),
+                        ((await self.store.bots())[0].id, self.store.instance, bot.id),
                     )
                     self.store.db.execute(
                         "DELETE FROM bots WHERE instance=? AND id=?", (self.store.instance, bot.id)
@@ -188,7 +188,7 @@ class BotAPI(ResourceScope):
         return web.json_response({"deleted": bot.id})
 
     async def select(self, request):
-        bot = self.bot(request)
+        bot = await self.bot(request)
         from delta_gateway.web import WEB_CHAT
 
         route = self.store.conversation(WEB_CHAT, self.server.actor)
@@ -202,7 +202,7 @@ class BotAPI(ResourceScope):
         return web.json_response(self.view(bot))
 
     async def messages(self, request):
-        bot = self.bot(request)
+        bot = await self.bot(request)
         rows = self.store.db.execute(
             "SELECT role,text FROM bot_chat WHERE instance=? AND bot=? ORDER BY id DESC LIMIT 200",
             (self.store.instance, bot.id),
@@ -213,7 +213,7 @@ class BotAPI(ResourceScope):
         )
 
     async def export(self, request):
-        bot = self.bot(request)
+        bot = await self.bot(request)
         rows = self.store.db.execute(
             "SELECT role,text FROM bot_chat WHERE instance=? AND bot=? ORDER BY id",
             (self.store.instance, bot.id),
@@ -224,7 +224,7 @@ class BotAPI(ResourceScope):
         )
 
     async def greeting(self, request):
-        bot = self.bot(request)
+        bot = await self.bot(request)
         saved = profile(self.store, bot)["greeting"]
         if saved:
             return web.json_response({"text": saved})

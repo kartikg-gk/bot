@@ -56,7 +56,7 @@ async def test_gmail_draft_does_not_send():
 async def test_only_granted_bots_can_call_a_plugin(store, monkeypatch):
     monkeypatch.setenv(GITHUB_TOKEN, "secret-token")
     team = Team(store, None, PluginRunner(transport=httpx.MockTransport(github)))
-    worker = store.create_bot("Researcher", "Finds things")
+    worker = await store.create_bot("Researcher", "Finds things")
     route = store.conversation(1, 1)
     arguments = dict(repo="a/b")
     with pytest.raises(ValueError, match="not enabled"):
@@ -71,9 +71,9 @@ async def test_only_granted_bots_can_call_a_plugin(store, monkeypatch):
     await team.plugins.close()
 
 
-def test_granted_tools_reach_any_bot_with_write_approval(tmp_path, store):
+async def test_granted_tools_reach_any_bot_with_write_approval(tmp_path, store):
     c = config(tmp_path)
-    worker = store.create_bot("Researcher", "Finds things")
+    worker = await store.create_bot("Researcher", "Finds things")
     prepared = prepare(c, worker, ["github"])
     by_name = {tool["name"]: tool for tool in prepared.definitions}
     assert "delegate_task" not in by_name
@@ -92,7 +92,7 @@ async def test_plugin_commands(tmp_path, monkeypatch):
     telegram = Bot()
     service = Service(c, telegram, factory="tests.fake_session:create")
     try:
-        worker = service.store.create_bot("Researcher", "Finds things")
+        worker = await service.store.create_bot("Researcher", "Finds things")
         await command(service, c, 1, "/plugin on github Researcher")
         assert any("not set up" in text for _, text, _ in telegram.sent)
         assert service.store.plugins_for(worker.id) == []
@@ -126,7 +126,7 @@ async def test_delegated_bot_calls_a_plugin_through_the_gateway(tmp_path, monkey
     await service.team.plugins.close()
     service.team.plugins = PluginRunner(transport=httpx.MockTransport(recorded))
     try:
-        worker = service.store.create_bot("Researcher", "Finds things")
+        worker = await service.store.create_bot("Researcher", "Finds things")
         service.store.set_plugin(worker.id, "github", True)
         await command(service, c, 1, "delegate:Researcher:plugin")
         assert calls == ["/repos/a/b/issues"]

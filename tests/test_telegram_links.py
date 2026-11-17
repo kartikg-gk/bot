@@ -76,7 +76,7 @@ async def test_telegram_private_links_isolate_accounts_and_destinations(accounts
     identities = {row["email"]: row for row in server.accounts.all_accounts()}
     for client, email in ((alice, "alice@example.test"), (bob, "bob@team.test")):
         runtime = server.runtimes.get(identities[email])
-        bot = runtime.store.bots()[0]
+        bot = (await runtime.store.bots())[0]
         with pytest.raises(ValueError, match="not enabled"):
             await runtime.team.call_plugin("telegram_send_message", {"text": "Fixture"}, bot)
         assert (

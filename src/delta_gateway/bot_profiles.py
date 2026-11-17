@@ -83,7 +83,7 @@ def bot_operation(function):
             async with lock:
                 if not delegated and manager.store.get_route(target.id).bot != bot_id:
                     continue
-                if manager.store.bot(bot_id) is None:
+                if await manager.store.bot(bot_id) is None:
                     raise ValueError("This bot has been deleted")
                 with reserve(manager, bot_id):
                     try:

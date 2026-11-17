@@ -29,13 +29,13 @@ class JobsAPI(ResourceScope):
         app.router.add_patch(path, self.edit)
         app.router.add_post(path + "/{action:pause|resume|cancel}", self.change_status)
 
-    def view(self, job, *, answer=False):
+    async def view(self, job, *, answer=False):
         result = asdict(job)
         for key in ("chat", "user", "thread", "actor"):
             result.pop(key)
         if not answer:
             result.pop("last_answer")
-        result["bot_name"] = getattr(self.store.bot(job.bot), "name", "Deleted bot")
+        result["bot_name"] = getattr(await self.store.bot(job.bot), "name", "Deleted bot")
         return result
 
     def job(self, request):
@@ -54,8 +54,8 @@ class JobsAPI(ResourceScope):
             raise web.HTTPBadRequest(text="Job settings must contain text")
         return result
 
-    def bot(self, identifier):
-        bot = self.store.bot(identifier)
+    async def bot(self, identifier):
+        bot = await self.store.bot(identifier)
         if bot is None or bot.temporary:
             raise web.HTTPBadRequest(text="Choose a persistent bot")
         return bot
@@ -69,7 +69,8 @@ class JobsAPI(ResourceScope):
             {
                 "automation": wakeups.enabled(self.store.db, self.store.instance),
                 "jobs": [
-                    self.view(job) for job in self.store.jobs(actor=self.server.actor, history=True)
+                    await self.view(job)
+                    for job in self.store.jobs(actor=self.server.actor, history=True)
                 ],
                 "scheduler": dict(zip(("heartbeat", "expires"), heartbeat, strict=True))
                 if heartbeat
@@ -79,7 +80,7 @@ class JobsAPI(ResourceScope):
 
     async def details(self, request):
         job = self.job(request)
-        data = self.view(job, answer=True)
+        data = await self.view(job, answer=True)
         data["wakeups"] = wakeups.history(self.store.db, self.store.instance, job.id)
         return web.json_response(data)
 
@@ -125,7 +126,7 @@ class JobsAPI(ResourceScope):
         values = await self.changes(request)
         if not {"bot", "when", "task"} <= values.keys():
             raise web.HTTPBadRequest(text="Choose a bot, timing, and task")
-        bot = self.bot(values["bot"])
+        bot = await self.bot(values["bot"])
         route = self.store.conversation(WEB_CHAT, self.server.actor)
         try:
             spec, first = parse_when(values["when"])
@@ -141,12 +142,12 @@ class JobsAPI(ResourceScope):
             )
         except ValueError as exc:
             raise web.HTTPBadRequest(text=str(exc)) from None
-        return web.json_response(self.view(self.store.job(identifier)), status=201)
+        return web.json_response(await self.view(self.store.job(identifier)), status=201)
 
     async def edit(self, request):
         values = await self.changes(request)
         job = self.job(request)
-        bot = self.bot(values.get("bot", job.bot))
+        bot = await self.bot(values.get("bot", job.bot))
         try:
             spec, first = parse_when(values["when"]) if "when" in values else (None, None)
         except ValueError as exc:
@@ -163,7 +164,7 @@ class JobsAPI(ResourceScope):
             )
         except ValueError as exc:
             raise web.HTTPConflict(text=str(exc)) from None
-        return web.json_response(self.view(self.store.job(job.id)))
+        return web.json_response(await self.view(self.store.job(job.id)))
 
     async def change_status(self, request):
         job = self.job(request)
@@ -175,4 +176,4 @@ class JobsAPI(ResourceScope):
                 self.store.set_job_paused(job.id, self.server.actor, action == "pause")
         except ValueError as exc:
             raise web.HTTPConflict(text=str(exc)) from None
-        return web.json_response(self.view(self.store.job(job.id)))
+        return web.json_response(await self.view(self.store.job(job.id)))

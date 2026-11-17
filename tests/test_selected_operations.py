@@ -13,15 +13,15 @@ from delta_gateway.task_cli import run_task
 from tests.test_gateway import config
 
 
-def populated(root, name):
+async def populated(root, name):
     root.mkdir()
     cfg = config(root, name=name)
     path = root / "gateway.yaml"
     save(path, cfg)
     store = Store(cfg.database_path, cfg.instance)
     try:
-        chief = store.bots()[0]
-        bot = store.create_bot("Reader", "Review notes", "Use citations")
+        chief = (await store.bots())[0]
+        bot = await store.create_bot("Reader", "Review notes", "Use citations")
         route = store.switch_bot(store.conversation(11, 11), bot)
         with store.db:
             save_profile(store, bot, {"style": "upbeat"})
@@ -59,8 +59,8 @@ def populated(root, name):
         store.close()
 
 
-def test_populated_instances_keep_bot_identity_and_remap_database_references(tmp_path):
-    sources = [populated(tmp_path / name, name) for name in ("alpha", "beta")]
+async def test_populated_instances_keep_bot_identity_and_remap_database_references(tmp_path):
+    sources = [await populated(tmp_path / name, name) for name in ("alpha", "beta")]
     paths = [item[1] for item in sources]
     target = tmp_path / "shared.sqlite3"
     migrate_configs(paths, destination=target)
@@ -71,8 +71,8 @@ def test_populated_instances_keep_bot_identity_and_remap_database_references(tmp
         assert migrated.database_path == target and migrated.state == cfg.state
         store = Store(target, cfg.instance)
         try:
-            assert {bot.id for bot in store.bots()} == {chief_id, bot_id}
-            assert profile(store, store.bot(bot_id))["style"] == "upbeat"
+            assert {bot.id for bot in await store.bots()} == {chief_id, bot_id}
+            assert profile(store, await store.bot(bot_id))["style"] == "upbeat"
             assert store.plugins_for(bot_id) == ["github"]
             assert store.jobs()[0].last_status == "interrupted"
             assert store.tasks()[0].status == "interrupted"
@@ -105,7 +105,7 @@ def test_populated_instances_keep_bot_identity_and_remap_database_references(tmp
 async def test_one_shot_runs_selected_bot_and_reports_provider_usage(tmp_path):
     cfg = config(tmp_path, policy="ask")
     store = Store(cfg.database_path, cfg.instance)
-    bot = store.create_bot("Reader", "Read documents")
+    bot = await store.create_bot("Reader", "Read documents")
     store.close()
     options = parser().parse_args(["task", "usage", "--bot", "Reader", "--json"])
     assert options.text == "usage" and options.json
@@ -135,7 +135,7 @@ async def test_one_shot_runs_selected_bot_and_reports_provider_usage(tmp_path):
 async def test_delegated_models_share_the_parent_task_budget(tmp_path):
     cfg = config(tmp_path, model_requests_per_run=2)
     store = Store(cfg.database_path, cfg.instance)
-    store.create_bot("Reader", "Read documents")
+    await store.create_bot("Reader", "Read documents")
     store.close()
     result = await run_task(cfg, "delegate:Reader:usage", factory="tests.fake_session:create")
     assert result["status"] == "failed"
@@ -160,7 +160,7 @@ async def test_langfuse_trace_exports_nested_metadata_without_prompt_or_tool_arg
 
     cfg = config(tmp_path)
     store = Store(cfg.database_path, cfg.instance)
-    store.create_bot("Reader", "Read documents")
+    await store.create_bot("Reader", "Read documents")
     store.close()
     sent = []
 

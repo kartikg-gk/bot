@@ -9,6 +9,7 @@ from uuid import uuid4
 
 from delta_gateway import wakeups
 from delta_gateway.bots import Bot
+from delta_gateway.database import SqliteDatabase
 from delta_gateway.migrations import SCHEMA, migrate
 from delta_gateway.routing import admit_message
 from delta_gateway.schedule import next_run
@@ -111,6 +112,11 @@ APPROVALS = (
     "approvals(instance,id,chat,user,run,tool,digest,created,expires,decision,source,thread)"
 )
 
+ENSURE_CHIEF = (
+    "INSERT INTO bots(id,instance,name,name_key,role,chief,created) "
+    "SELECT ?,?,?,?,?,1,? WHERE NOT EXISTS (SELECT 1 FROM bots WHERE instance=? AND chief=1)"
+)
+
 
 class Store:
     def __init__(self, directory, instance, *, retention_days=None):
@@ -192,7 +198,11 @@ class Store:
             )
 
         self.seed_routes(directory / "sessions")
-        self.ensure_chief()
+        self.db.execute(ENSURE_CHIEF, self.chief_values())
+        self.db.commit()
+        # Methods move to this shared interface one group at a time; both use the same file.
+        self.shared = SqliteDatabase(self.path)
+        self.shared.connection.execute("PRAGMA foreign_keys=ON")
 
     def memory_index_path(self, state):
         row = self.db.execute(
@@ -200,83 +210,84 @@ class Store:
         ).fetchone()
         return state / "memory" / (f"qdrant-{row[0]}" if row else "qdrant")
 
-    def ensure_chief(self):
-        with self.db:
-            if not self.db.execute(
-                "SELECT 1 FROM bots WHERE instance=? AND chief=1", (self.instance,)
-            ).fetchone():
-                self.db.execute(
-                    "INSERT INTO bots(id,instance,name,name_key,role,chief,created) "
-                    "VALUES(?,?,?,?,?,1,?)",
-                    (
-                        uuid4().hex,
-                        self.instance,
-                        "Chief of Staff",
-                        "chief of staff",
-                        "The user's primary bot.",
-                        time.time(),
-                    ),
-                )
+    def chief_values(self):
+        return (
+            uuid4().hex,
+            self.instance,
+            "Chief of Staff",
+            "chief of staff",
+            "The user's primary bot.",
+            time.time(),
+            self.instance,
+        )
 
-    def bots(self, *, temporary=False):
+    async def ensure_chief(self):
+        await self.shared.run(ENSURE_CHIEF, self.chief_values())
+
+    async def bots(self, *, temporary=False):
+        rows = await self.shared.query(
+            "SELECT id,name,role,instructions,chief,temporary FROM bots WHERE instance=? "
+            "AND (? OR temporary=0) ORDER BY chief DESC,created",
+            (self.instance, int(temporary)),
+        )
         return [
-            Bot(row[0], row[1], row[2], row[3], bool(row[4]), bool(row[5]))
-            for row in self.db.execute(
-                "SELECT id,name,role,instructions,chief,temporary FROM bots WHERE instance=? "
-                "AND (? OR temporary=0) ORDER BY chief DESC,created",
-                (self.instance, int(temporary)),
-            ).fetchall()
+            Bot(
+                row["id"],
+                row["name"],
+                row["role"],
+                row["instructions"],
+                bool(row["chief"]),
+                bool(row["temporary"]),
+            )
+            for row in rows
         ]
 
-    def bot(self, identifier):
-        return next((bot for bot in self.bots(temporary=True) if bot.id == identifier), None)
+    async def bot(self, identifier):
+        return next((bot for bot in await self.bots(temporary=True) if bot.id == identifier), None)
 
-    def find_bot(self, name):
+    async def find_bot(self, name):
         key = name.strip().casefold()
-        return next((bot for bot in self.bots() if bot.name.casefold() == key), None)
+        return next((bot for bot in await self.bots() if bot.name.casefold() == key), None)
 
-    def create_bot(self, name, role, instructions="", *, temporary=False):
+    async def create_bot(self, name, role, instructions="", *, temporary=False):
         name, role = name.strip(), role.strip()
         if not name or not role:
             raise ValueError("A bot needs a name and a purpose")
-        if self.find_bot(name):
+        if await self.find_bot(name):
             raise ValueError(f"A bot named {name} already exists")
         identifier = uuid4().hex
-        with self.db:
-            self.db.execute(
-                "INSERT INTO bots(id,instance,name,name_key,role,instructions,temporary,created) "
-                "VALUES(?,?,?,?,?,?,?,?)",
-                (
-                    identifier,
-                    self.instance,
-                    name,
-                    name.casefold(),
-                    role,
-                    instructions,
-                    int(temporary),
-                    time.time(),
-                ),
-            )
-        return self.bot(identifier)
+        await self.shared.run(
+            "INSERT INTO bots(id,instance,name,name_key,role,instructions,temporary,created) "
+            "VALUES(?,?,?,?,?,?,?,?)",
+            (
+                identifier,
+                self.instance,
+                name,
+                name.casefold(),
+                role,
+                instructions,
+                int(temporary),
+                time.time(),
+            ),
+        )
+        return await self.bot(identifier)
 
-    def keep_bot(self, identifier, name):
+    async def keep_bot(self, identifier, name):
         name = name.strip()
         if not name:
             raise ValueError("Give the agent a name")
-        if self.find_bot(name):
+        if await self.find_bot(name):
             raise ValueError(f"A bot named {name} already exists")
-        with self.db:
-            self.db.execute(
-                "UPDATE bots SET name=?,name_key=?,temporary=0 WHERE instance=? AND id=?",
-                (name, name.casefold(), self.instance, identifier),
-            )
+        await self.shared.run(
+            "UPDATE bots SET name=?,name_key=?,temporary=0 WHERE instance=? AND id=?",
+            (name, name.casefold(), self.instance, identifier),
+        )
 
-    def remove_bot(self, identifier):
-        with self.db:
-            self.db.execute(
-                "DELETE FROM bots WHERE instance=? AND id=? AND temporary=1",
-                (self.instance, identifier),
-            )
+    async def remove_bot(self, identifier):
+        await self.shared.run(
+            "DELETE FROM bots WHERE instance=? AND id=? AND temporary=1",
+            (self.instance, identifier),
+        )
 
     def add_task(self, chat, user, actor, thread, bot, goal, policy, follow_up):
         with self.db:
@@ -612,16 +623,15 @@ class Store:
         if not changed:
             raise ValueError("No cancellable job with that number")
 
-    def update_bot(self, identifier, role, instructions):
-        with self.db:
-            self.db.execute(
-                "UPDATE bots SET role=?,instructions=? WHERE instance=? AND id=?",
-                (role, instructions, self.instance, identifier),
-            )
-            self.db.execute(
-                "UPDATE bot_profiles SET greeting=NULL WHERE instance=? AND bot=?",
-                (self.instance, identifier),
-            )
+    async def update_bot(self, identifier, role, instructions):
+        await self.shared.run(
+            "UPDATE bots SET role=?,instructions=? WHERE instance=? AND id=?",
+            (role, instructions, self.instance, identifier),
+        )
+        await self.shared.run(
+            "UPDATE bot_profiles SET greeting=NULL WHERE instance=? AND bot=?",
+            (self.instance, identifier),
+        )
 
     def begin_delegation(self, route, bot, task):
         try:
@@ -1121,6 +1131,8 @@ class Store:
         ).fetchall()
 
     def close(self):
+        if hasattr(self, "shared"):
+            self.shared.close_now()
         self.db.close()
 
     def owns(self, chat, user, thread, session):

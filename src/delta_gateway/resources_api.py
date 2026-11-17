@@ -19,11 +19,11 @@ class ResourcesAPI(ResourceScope):
         app.router.add_get("/api/bots/{bot}/memory", self.notes)
         app.router.add_put("/api/bots/{bot}/memory", self.notes)
 
-    def bot(self, request):
+    async def bot(self, request):
         identifier = request.match_info.get("bot")
         if identifier is None:
             return None
-        bot = self.store.bot(identifier)
+        bot = await self.store.bot(identifier)
         if bot is None or bot.temporary:
             raise web.HTTPNotFound(text="Unknown bot")
         return bot
@@ -35,7 +35,7 @@ class ResourcesAPI(ResourceScope):
         return load_bot_skills(self.config, self.root(bot) if bot else None)
 
     async def catalog(self, request):
-        bot = self.bot(request)
+        bot = await self.bot(request)
         root = self.root(bot)
         return web.json_response(
             [
@@ -50,7 +50,7 @@ class ResourcesAPI(ResourceScope):
         )
 
     async def read(self, request):
-        bot = self.bot(request)
+        bot = await self.bot(request)
         skill = next((s for s in self.skills(bot) if s.name == request.match_info["name"]), None)
         if skill is None:
             raise web.HTTPNotFound(text="Unknown skill")
@@ -63,7 +63,7 @@ class ResourcesAPI(ResourceScope):
         return web.json_response(dict(name=skill.name, files=files))
 
     async def save(self, request):
-        bot = self.bot(request)
+        bot = await self.bot(request)
         try:
             body = await request.json()
             if not isinstance(body, dict) or set(body) != {"name", "files"}:
@@ -81,7 +81,7 @@ class ResourcesAPI(ResourceScope):
         return web.json_response(dict(saved=body["name"]))
 
     async def remove(self, request):
-        bot = self.bot(request)
+        bot = await self.bot(request)
         try:
             if bot:
                 with reserve(self.sessions, bot.id):
@@ -96,7 +96,7 @@ class ResourcesAPI(ResourceScope):
         return web.json_response(dict(deleted=request.match_info["name"]))
 
     async def notes(self, request):
-        bot = self.bot(request)
+        bot = await self.bot(request)
         root = bot_root(self.config, bot) / "memory"
         if request.method == "GET":
             try:

@@ -27,12 +27,12 @@ def store(tmp_path):
     result.close()
 
 
-def add(store, spec="every:60", at=0, missed="run"):
-    return store.add_job(11, 11, 11, 0, store.bots()[0].id, "task", spec, at, missed)
+async def add(store, spec="every:60", at=0, missed="run"):
+    return store.add_job(11, 11, 11, 0, (await store.bots())[0].id, "task", spec, at, missed)
 
 
-def test_claim_advances_before_running_and_prevents_overlap(store):
-    job = add(store)
+async def test_claim_advances_before_running_and_prevents_overlap(store):
+    job = await add(store)
     claimed = store.claim_due(1000)
     assert [c.id for c in claimed] == [job]
     assert claimed[0].next_run == 1060
@@ -41,8 +41,8 @@ def test_claim_advances_before_running_and_prevents_overlap(store):
     assert [c.id for c in store.claim_due(2000)] == [job]
 
 
-def test_once_job_finishes_and_restart_never_replays(tmp_path, store):
-    job = add(store, "once")
+async def test_once_job_finishes_and_restart_never_replays(tmp_path, store):
+    job = await add(store, "once")
     assert store.claim_due(1000)
     store.close()
     reopened = Store(tmp_path / "state", "a" * 32)
@@ -54,18 +54,18 @@ def test_once_job_finishes_and_restart_never_replays(tmp_path, store):
         reopened.close()
 
 
-def test_missed_policy_skip_moves_on_without_running(store):
-    job = add(store, missed="skip")
+async def test_missed_policy_skip_moves_on_without_running(store):
+    job = await add(store, missed="skip")
     assert store.claim_due(1000) == []
     assert store.job(job).next_run == 1060
     assert store.job(job).last_status == "missed"
 
 
-def test_active_job_limit(store):
+async def test_active_job_limit(store):
     for _ in range(50):
-        add(store)
+        await add(store)
     with pytest.raises(ValueError):
-        add(store)
+        await add(store)
 
 
 async def wait_jobs(service):
@@ -83,7 +83,7 @@ async def test_due_job_runs_as_its_bot_and_reports_to_chat(tmp_path):
     telegram = Bot()
     service = Service(c, telegram, factory="tests.fake_session:create")
     try:
-        worker = service.store.create_bot("Researcher", "Finds things")
+        worker = await service.store.create_bot("Researcher", "Finds things")
         await command(service, c, 1, "/schedule every 1h | Researcher | check things")
         rows = service.store.jobs()
         assert rows[0].bot == worker.id and rows[0].next_run > time.time()
@@ -121,7 +121,7 @@ async def test_unattended_job_refuses_a_write_without_opening_approval(tmp_path)
     c = config(tmp_path, policy="ask")
     service = Service(c, Bot(), factory="tests.fake_session:create")
     try:
-        worker = service.store.create_bot("Researcher", "Finds things")
+        worker = await service.store.create_bot("Researcher", "Finds things")
         service.store.add_job(11, 11, 11, 0, worker.id, "write", "once", 0, "run")
         service.run_due()
         async with asyncio.timeout(10):

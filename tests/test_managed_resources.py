@@ -90,7 +90,7 @@ def test_supporting_file_symlinks_are_rejected(tmp_path):
 
 async def test_web_skill_catalog_editor_and_notes(web):
     service, client, _ = web
-    bot = service.store.create_bot("Reader", "Read documents")
+    bot = await service.store.create_bot("Reader", "Read documents")
     path = "/api/bots/" + bot.id
     assert (
         await client.post(path + "/skills", json={"name": "research", "files": package()})
@@ -117,7 +117,7 @@ async def test_web_cannot_mutate_busy_bot_resources(web):
     service, client, _ = web
     from delta_gateway.bot_profiles import reserve
 
-    bot = service.store.create_bot("Reader", "Read documents")
+    bot = await service.store.create_bot("Reader", "Read documents")
     path = "/api/bots/" + bot.id
     with reserve(service.sessions, bot.id):
         assert (
@@ -131,7 +131,7 @@ async def test_web_cannot_mutate_busy_bot_resources(web):
 async def test_skill_and_notes_changes_refresh_next_engine(web):
     service, _, _ = web
     manager, store = service.sessions, service.store
-    bot = store.create_bot("Reader", "Read documents")
+    bot = await store.create_bot("Reader", "Read documents")
     route = store.switch_bot(store.conversation(11, 11), bot)
     await manager.prompt(route, "hello")
     old = next(iter(manager.clients.values()))
@@ -181,7 +181,7 @@ class CountComputer(LocalComputer):
 async def test_computer_is_lazy_and_stops_at_task_end(web):
     service, _, _ = web
     service.config.policy = "auto"
-    bot = service.store.bots()[0]
+    bot = (await service.store.bots())[0]
     route = service.store.conversation(11, 11)
     base = CountComputer(service.config.project)
     base.memory_path = str(service.config.state / "bots" / bot.id / "memory")
@@ -198,7 +198,7 @@ async def test_computer_is_lazy_and_stops_at_task_end(web):
 
 async def test_computer_releases_on_cancel_and_handles_parallel_acquisition(web):
     service, _, _ = web
-    bot = service.store.bots()[0]
+    bot = (await service.store.bots())[0]
     base = CountComputer(service.config.project)
     base.memory_path = str(service.config.state / "bots" / bot.id / "memory")
     managed = ManagedComputer(base)
@@ -270,7 +270,7 @@ async def test_managed_note_write_is_mirrored_to_acquired_remote_memory(web, tmp
     from delta_gateway.bots import bot_root
 
     service, _, _ = web
-    bot = service.store.create_bot("Reader", "Read documents")
+    bot = await service.store.create_bot("Reader", "Read documents")
     base = CountComputer(tmp_path / "computer")
     base.memory_path = str(tmp_path / "remote-notes")
     managed = ManagedComputer(base)

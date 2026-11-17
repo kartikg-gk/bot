@@ -461,7 +461,7 @@ async def test_app_connection_is_private_refreshes_and_revokes(accounts, monkeyp
         item for item in server.accounts.all_accounts() if item["email"].startswith("alice")
     )
     runtime = server.runtimes.get(alice_account)
-    bot = runtime.store.create_bot("Apps worker", "Tests app access")
+    bot = await runtime.store.create_bot("Apps worker", "Tests app access")
     grant = path + f"/bots/{bot.id}"
     assert (await bob.put(grant, json={"enabled": True})).status_code == 404
     assert (await alice.put(grant, json={"enabled": True})).status_code == 200
@@ -470,7 +470,7 @@ async def test_app_connection_is_private_refreshes_and_revokes(accounts, monkeyp
     assert next(item for item in alice_apps if item["id"] == name)["connected"]
     assert not next(item for item in bob_apps if item["id"] == name)["connected"]
     with pytest.raises(ValueError, match="not enabled"):
-        await runtime.team.call_plugin(tool, tool_arguments, runtime.store.bots()[0])
+        await runtime.team.call_plugin(tool, tool_arguments, (await runtime.store.bots())[0])
 
     account = alice_account["id"]
     tokens = await asyncio.gather(*(server.apps.token(account, name) for _ in range(3)))
