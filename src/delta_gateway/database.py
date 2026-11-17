@@ -3,7 +3,8 @@
 D1 is used when ``CLOUDFLARE_D1_DATABASE_ID`` is set, which then needs the API token and
 account ID as well. Both backends run the same SQL, since D1 runs SQLite. D1's HTTP API
 binds text only, so numbers are sent as text and column affinity converts them back. It
-cannot bind NULL: write ``NULLIF(?, '')`` and pass an empty string instead.
+cannot bind NULL either, so a None parameter is written into the statement as NULL,
+which behaves exactly like binding it. Both backends do this, so they stay identical.
 """
 
 import asyncio
@@ -37,13 +38,26 @@ class Database(Protocol):
     async def close(self) -> None: ...
 
 
-def bindable(params):
-    values = []
-    for value in params:
-        if value is None:
-            raise TypeError("A database parameter cannot be None; use NULLIF(?, '') and pass ''")
-        values.append(value)
-    return values
+def inline_nulls(sql, params):
+    """Replace each ``?`` whose parameter is None with NULL, skipping quoted text."""
+    params = list(params)
+    if all(value is not None for value in params):
+        return sql, params
+    out, kept, index, quote = [], [], 0, None
+    for char in sql:
+        if quote:
+            quote = None if char == quote else quote
+        elif char in "'\"":
+            quote = char
+        elif char == "?":
+            value = params[index]
+            index += 1
+            if value is None:
+                out.append("NULL")
+                continue
+            kept.append(value)
+        out.append(char)
+    return "".join(out), kept
 
 
 class SqliteDatabase:
@@ -66,7 +80,7 @@ class SqliteDatabase:
             return [dict(row) for row in rows], self.connection.total_changes - before
 
     async def _call(self, sql, params):
-        return await asyncio.to_thread(self._execute, sql, bindable(params))
+        return await asyncio.to_thread(self._execute, *inline_nulls(sql, params))
 
     async def query(self, sql, params=()):
         return (await self._call(sql, params))[0]
@@ -111,7 +125,8 @@ class D1Database:
         self.http = http or httpx.AsyncClient()
 
     async def _execute(self, sql, params):
-        body = {"sql": sql, "params": [as_text(value) for value in bindable(params)]}
+        sql, params = inline_nulls(sql, params)
+        body = {"sql": sql, "params": [as_text(value) for value in params]}
         try:
             response = await self.http.post(
                 self.url, headers=self.headers, json=body, timeout=D1_TIMEOUT

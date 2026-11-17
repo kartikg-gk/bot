@@ -36,9 +36,22 @@ async def test_check_succeeds(database):
     await database.check()
 
 
-async def test_null_parameter_refused(database):
-    with pytest.raises(TypeError, match="NULLIF"):
-        await database.query("SELECT ?", [None])
+async def test_null_parameters_are_written_as_null(database):
+    await database.run("CREATE TABLE notes (id TEXT, body TEXT, size INTEGER)")
+    await database.run("INSERT INTO notes (id, body, size) VALUES (?, ?, ?)", ["a", None, 3])
+    await database.run("UPDATE notes SET size = ? WHERE id = ?", [None, "a"])
+    rows = await database.query(
+        "SELECT body, size, 'what?' AS literal, ? AS after FROM notes WHERE id = ?", ["x", "a"]
+    )
+    assert rows == [{"body": None, "size": None, "literal": "what?", "after": "x"}]
+
+
+def test_null_inlining_skips_quoted_marks():
+    from delta_gateway.database import inline_nulls
+
+    sql, params = inline_nulls("SELECT '?', \"a?\", ?, ?", [None, 2])
+    assert sql == "SELECT '?', \"a?\", NULL, ?"
+    assert params == [2]
 
 
 async def test_numbers_sent_as_text_to_d1():
