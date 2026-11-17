@@ -126,15 +126,15 @@ async def test_restart_retains_replay_and_does_not_requeue_inflight_run(tmp_path
     run, inbox = await journal.queue(route, "inflight", WEB_IDS)
     pending, _ = await journal.queue(route, "queued", WEB_IDS)
     await store.mark(inbox, "running")
-    journal.emit(run, "run_started", bot=route.bot)
+    await journal.emit(run, "run_started", bot=route.bot)
     store.close()
     store = Store(c.database_path, c.instance)
     try:
         journal = RunJournal(store)
-        assert journal.get(run, 99) is None
-        assert journal.get(run, 11)["status"] == "uncertain"
-        assert [row["id"] for row in journal.active(11)] == [pending]
-        assert [kind for _, kind, _ in journal.events(run, 0)] == [
+        assert await journal.get(run, 99) is None
+        assert (await journal.get(run, 11))["status"] == "uncertain"
+        assert [row["id"] for row in await journal.active(11)] == [pending]
+        assert [kind for _, kind, _ in await journal.events(run, 0)] == [
             "run_queued",
             "run_started",
             "run_finished",

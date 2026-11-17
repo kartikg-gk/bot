@@ -146,7 +146,7 @@ class Service:
         if run:
             details = self.web_approval_view(handle, card)
             details.pop("run")
-            self.runs.emit(run, "approval_requested", **details)
+            await self.runs.emit(run, "approval_requested", **details)
         try:
             text = (
                 f"Approve once? Tool: {normalized['tool']}\n"
@@ -178,7 +178,7 @@ class Service:
             return
         await self.store.decide(card["event"]["approval_id"], allow, source)
         if card["run"]:
-            self.runs.emit(card["run"], "approval_resolved", id=handle, allowed=allow)
+            await self.runs.emit(card["run"], "approval_resolved", id=handle, allowed=allow)
         if card["message"] is not None and not self.stopping:
             with contextlib.suppress(TelegramError):
                 await self.telegram.call(
@@ -256,7 +256,7 @@ class Service:
         card = self.cards.get(handle)
         if not card or card["key"][0] != chat or card["actor"] != actor or card.get("deciding"):
             return False
-        if card["run"] and self.runs.status(card["run"]) == "cancelling":
+        if card["run"] and await self.runs.status(card["run"]) == "cancelling":
             return False
         card["deciding"] = True
         allow = allow and time.time() < card["event"]["expires_at"]
@@ -289,12 +289,12 @@ class Service:
         async def accepted():
             await self.store.mark(item.id, "running")
             if run:
-                self.runs.emit(run, "run_started", bot=route.bot)
+                await self.runs.emit(run, "run_started", bot=route.bot)
 
-        def tool_event(record, bot):
+        async def tool_event(record, bot):
             kind = record.get("type")
             if run and kind in {"tool_execution_start", "tool_execution_end"}:
-                self.runs.emit(
+                await self.runs.emit(
                     run,
                     "tool_started" if kind.endswith("start") else "tool_finished",
                     id=record.get("toolCallId"),
@@ -328,7 +328,7 @@ class Service:
                 return host_call(client, record, bot)
             if record.get("type") == "tool_execution_start":
                 await preview.update(f"{bot.name}: working")
-            tool_event(record, bot.id)
+            await tool_event(record, bot.id)
             await approvals(client, record, bot.id)
 
         async def event(record, partial):
@@ -351,11 +351,11 @@ class Service:
                     and partial
                     and time.monotonic() >= last_preview + 0.15
                 ):
-                    self.runs.emit(run, "assistant_text", text=partial)
+                    await self.runs.emit(run, "assistant_text", text=partial)
                     last_preview = time.monotonic()
                 await preview.update(partial)
             elif kind in {"tool_execution_start", "tool_execution_end"}:
-                tool_event(record, route.bot)
+                await tool_event(record, route.bot)
                 if self.runs is not None and not item.thread:
                     self.telegram.tool_event(item.chat, record)
                 name = "".join(
@@ -399,7 +399,7 @@ class Service:
                 if outcome != "completed" and final:
                     final += f"\n[Run {outcome}]"
                 if run:
-                    self.runs.answer(run, final)
+                    await self.runs.answer(run, final)
                 try:
                     await self.reply(route, final)
                     await self.store.mark(item.id, outcome)
@@ -412,7 +412,7 @@ class Service:
                     self.memory_tasks.add(extraction)
                     extraction.add_done_callback(self.memory_tasks.discard)
         except asyncio.CancelledError:
-            if started and (not run or self.runs.status(run) != "cancelling"):
+            if started and (not run or await self.runs.status(run) != "cancelling"):
                 await self.store.mark(item.id, "uncertain")
             raise
         except (RuntimeError, OSError, ValueError):
@@ -440,7 +440,7 @@ class Service:
                 if self.config.spend_metered and (scope := operation.get()):
                     totals["reserved_micros"] = scope[1].spend_micros
                 if usage.model_messages or "reserved_micros" in totals:
-                    self.runs.emit(run, "run_usage", **totals)
+                    await self.runs.emit(run, "run_usage", **totals)
 
     async def extractor_call(self, prompt):
         extractor = next(
@@ -625,7 +625,7 @@ class Service:
     async def stop(self, item, route):
         await self.store.clear_route_queue(item.key)
         if item.chat == WEB_CHAT and self.runs:
-            self.runs.recover()
+            await self.runs.recover()
         task = self.jobs.get(item.key)
         if task and not task.done():
             task.cancel()
@@ -1139,12 +1139,12 @@ class Service:
                     else "Command failed; inspect local configuration.",
                 )
 
-    def launch_prompt(self, item, *, behavior=None):
+    async def launch_prompt(self, item, *, behavior=None):
         run = item.run if item.chat == WEB_CHAT and self.runs else None
         if not run:
             self.jobs[item.key] = asyncio.create_task(self.prompt(item, behavior=behavior))
             return
-        bot = self.runs.bot(run)
+        bot = await self.runs.bot(run)
         if bot in self.sessions.active_bots or any(
             owner == bot for owner, _ in self.run_tasks.values()
         ):
@@ -1154,14 +1154,14 @@ class Service:
             try:
                 await self.prompt(item, behavior=behavior)
             except Exception:
-                status = self.runs.status(run)
+                status = await self.runs.status(run)
                 if status in {"dispatching", "running", "delivering"}:
                     await self.store.mark(item.id, "uncertain")
                 elif status in {"pending", "prompt", "scheduled"}:
                     await self.store.mark(item.id, "failed")
                 raise
             finally:
-                self.runs.finish(run)
+                await self.runs.finish(run)
 
         task = self.jobs[item.key] = asyncio.create_task(execute())
         self.run_tasks[run] = bot, task
@@ -1176,7 +1176,7 @@ class Service:
                 active[1].cancel()
         if active:
             await asyncio.shield(asyncio.gather(active[1], return_exceptions=True))
-        self.runs.finish(run)
+        await self.runs.finish(run)
         return True
 
     async def dispatch(self):
@@ -1206,7 +1206,7 @@ class Service:
                     elif item.key not in self.jobs:
                         await self.store.replace_prompt(item.id, argument)
                         item.text, item.status = argument, "prompt"
-                        self.launch_prompt(
+                        await self.launch_prompt(
                             item, behavior={"/steer": "steer", "/queue": "followUp"}.get(command)
                         )
                 elif is_command:
@@ -1242,7 +1242,7 @@ class Service:
                 elif item.key not in self.jobs:
                     if item.status != "prompt":
                         await self.store.mark(item.id, "scheduled")
-                    self.launch_prompt(item)
+                    await self.launch_prompt(item)
             for item in await self.store.items():
                 if self.config.web_only and item.chat != WEB_CHAT:
                     continue
@@ -1251,7 +1251,7 @@ class Service:
                 ) and item.key not in self.jobs:
                     if item.status != "prompt":
                         await self.store.mark(item.id, "scheduled")
-                    self.launch_prompt(item)
+                    await self.launch_prompt(item)
 
     async def cleanup_idle(self):
         await self.sessions.cleanup()

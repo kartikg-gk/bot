@@ -23,8 +23,8 @@ class RunAPI(ResourceScope):
     def journal(self):
         return self.service.runs
 
-    def lookup(self, run):
-        result = self.journal.get(run, self.server.actor)
+    async def lookup(self, run):
+        result = await self.journal.get(run, self.server.actor)
         if result is None:
             raise web.HTTPNotFound(text="Unknown run")
         return result
@@ -57,43 +57,45 @@ class RunAPI(ResourceScope):
         if "text/event-stream" in request.headers.get("Accept", ""):
             return await self.follow(request, run, 0)
         return web.json_response(
-            self.lookup(run), status=202, headers={"Location": f"/api/runs/{run}"}
+            await self.lookup(run), status=202, headers={"Location": f"/api/runs/{run}"}
         )
 
     async def active(self, request):
         bot = request.query.get("bot")
         if request.query.get("recent") == "1":
-            return web.json_response(self.journal.recent(self.server.actor, bot))
-        runs = self.journal.active(self.server.actor)
+            return web.json_response(await self.journal.recent(self.server.actor, bot))
+        runs = await self.journal.active(self.server.actor)
         return web.json_response([run for run in runs if not bot or bot == run["bot"]])
 
     async def get(self, request):
-        return web.json_response(self.lookup(request.match_info["run"]))
+        return web.json_response(await self.lookup(request.match_info["run"]))
 
     async def activity(self, request):
         run = request.match_info["run"]
-        self.lookup(run)
-        return web.json_response(self.journal.activity(run), headers={"Cache-Control": "no-store"})
+        await self.lookup(run)
+        return web.json_response(
+            await self.journal.activity(run), headers={"Cache-Control": "no-store"}
+        )
 
     async def stop(self, request):
         run = request.match_info["run"]
-        current = self.lookup(run)
+        current = await self.lookup(run)
         bot = request.match_info.get("bot")
         if bot is not None and current["bot"] != bot:
             raise web.HTTPNotFound(text="Unknown run for this bot")
         if not await self.service.stop_web_run(run, self.server.actor):
             raise web.HTTPConflict(text="This run has already stopped or is stopping")
-        return web.json_response(self.lookup(run))
+        return web.json_response(await self.lookup(run))
 
     async def approvals(self, request):
         run = request.query.get("run")
         if run:
-            self.lookup(run)
+            await self.lookup(run)
         return web.json_response(self.service.web_approvals(self.server.actor, run))
 
     async def stream(self, request):
         run = request.match_info["run"]
-        self.lookup(run)
+        await self.lookup(run)
         raw = request.headers.get("Last-Event-ID", request.query.get("after", "0"))
         if not raw.isascii() or not raw.isdigit() or len(raw) > 16:
             raise web.HTTPBadRequest(text="Invalid event cursor")
@@ -116,8 +118,8 @@ class RunAPI(ResourceScope):
                 if self.server.google and not (await self.server.account_from_cookie(request)):
                     break
                 event.clear()
-                result = journal.get(run, self.server.actor)
-                rows = journal.events(run, after)
+                result = await journal.get(run, self.server.actor)
+                rows = await journal.events(run, after)
                 if rows and rows[0][0] > after + 1:
                     gap = json.dumps({"type": "replay_gap", "run": run, "next": rows[0][0]})
                     await response.write(f"event: replay_gap\ndata: {gap}\n\n".encode())
