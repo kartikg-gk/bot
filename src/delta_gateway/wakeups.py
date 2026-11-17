@@ -71,14 +71,17 @@ async def history(db, instance, job):
     )
 
 
+# Wake-ups still marked running whose job is no longer running that claim.
+INTERRUPTED = (
+    "UPDATE job_wakeups SET status='interrupted',finished=? "
+    "WHERE instance=? AND status='running' "
+    "AND NOT EXISTS (SELECT 1 FROM jobs WHERE jobs.instance=job_wakeups.instance "
+    "AND jobs.id=job_wakeups.job AND jobs.running=1 AND jobs.last_run=job_wakeups.claimed)"
+)
+
+
 def interrupted(db, instance, now):
-    db.execute(
-        "UPDATE job_wakeups SET status='interrupted',finished=? "
-        "WHERE instance=? AND status='running' "
-        "AND NOT EXISTS (SELECT 1 FROM jobs WHERE jobs.instance=job_wakeups.instance "
-        "AND jobs.id=job_wakeups.job AND jobs.running=1 AND jobs.last_run=job_wakeups.claimed)",
-        (now, instance),
-    )
+    db.execute(INTERRUPTED, (now, instance))
 
 
 async def automation_on(db, instance):
@@ -89,10 +92,4 @@ async def automation_on(db, instance):
 
 async def mark_interrupted(db, instance, now):
     """interrupted() for the shared database interface."""
-    await db.run(
-        "UPDATE job_wakeups SET status='interrupted',finished=? "
-        "WHERE instance=? AND status='running' "
-        "AND NOT EXISTS (SELECT 1 FROM jobs WHERE jobs.instance=job_wakeups.instance "
-        "AND jobs.id=job_wakeups.job AND jobs.running=1 AND jobs.last_run=job_wakeups.claimed)",
-        (now, instance),
-    )
+    await db.run(INTERRUPTED, (now, instance))

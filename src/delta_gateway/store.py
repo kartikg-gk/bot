@@ -10,7 +10,7 @@ from uuid import uuid4
 from delta_gateway import wakeups
 from delta_gateway.bots import Bot
 from delta_gateway.database import ConstraintError, SqliteDatabase
-from delta_gateway.migrations import SCHEMA, migrate
+from delta_gateway.migrations import SCHEMA, ensure_schema, migrate
 from delta_gateway.routing import admit_message
 from delta_gateway.schedule import next_run
 
@@ -150,6 +150,41 @@ ENSURE_CHIEF = (
 )
 
 
+def recovery_steps(instance, now):
+    """Statements that settle work a stopped gateway left unfinished."""
+    return [
+        ("UPDATE inbox SET status='pending' WHERE instance=? AND status='scheduled'", (instance,)),
+        ("INSERT OR IGNORE INTO instances(id) VALUES(?)", (instance,)),
+        (
+            "UPDATE inbox SET status='uncertain',version=version+1 WHERE instance=? AND status IN "
+            "('dispatching','running','delivering','cancelling')",
+            (instance,),
+        ),
+        (
+            "UPDATE tasks SET status='interrupted',finished=? "
+            "WHERE instance=? AND status='running'",
+            (now, instance),
+        ),
+        (
+            "UPDATE jobs SET running=0,last_status='interrupted',last_answer=NULL,"
+            "version=version+1 WHERE instance=? AND running=1 AND NOT EXISTS ("
+            "SELECT 1 FROM scheduler_leases WHERE instance=? AND expires>?)",
+            (instance, instance, now),
+        ),
+        (wakeups.INTERRUPTED, (now, instance)),
+        (
+            "UPDATE delegations SET status='interrupted',finished=?,version=version+1 "
+            "WHERE instance=? AND status='running'",
+            (now, instance),
+        ),
+        (
+            "UPDATE approvals SET decision='denied',source='restart',version=version+1 "
+            "WHERE instance=? AND decision IS NULL",
+            (instance,),
+        ),
+    ]
+
+
 class Store:
     def __init__(self, directory, instance, *, retention_days=None):
         directory = Path(directory)
@@ -196,38 +231,8 @@ class Store:
             raise
         path.chmod(0o600)
         with self.db:
-            self.db.execute(
-                "UPDATE inbox SET status='pending' WHERE instance=? AND status='scheduled'",
-                (instance,),
-            )
-            self.db.execute("INSERT OR IGNORE INTO instances(id) VALUES(?)", (instance,))
-            self.db.execute(
-                "UPDATE inbox SET status='uncertain' WHERE instance=? AND status IN "
-                "('dispatching','running','delivering','cancelling')",
-                (instance,),
-            )
-            self.db.execute(
-                "UPDATE tasks SET status='interrupted',finished=? "
-                "WHERE instance=? AND status='running'",
-                (time.time(), instance),
-            )
-            self.db.execute(
-                "UPDATE jobs SET running=0,last_status='interrupted',last_answer=NULL "
-                "WHERE instance=? AND running=1 AND NOT EXISTS ("
-                "SELECT 1 FROM scheduler_leases WHERE instance=? AND expires>?)",
-                (instance, instance, time.time()),
-            )
-            wakeups.interrupted(self.db, instance, time.time())
-            self.db.execute(
-                "UPDATE delegations SET status='interrupted',finished=? "
-                "WHERE instance=? AND status='running'",
-                (time.time(), instance),
-            )
-            self.db.execute(
-                "UPDATE approvals SET decision='denied',source='restart' "
-                "WHERE instance=? AND decision IS NULL",
-                (instance,),
-            )
+            for sql, params in recovery_steps(instance, time.time()):
+                self.db.execute(sql, params)
 
         self.seed_routes(directory / "sessions")
         self.db.execute(ENSURE_CHIEF, self.chief_values())
@@ -235,6 +240,26 @@ class Store:
         # Methods move to this shared interface one group at a time; both use the same file.
         self.shared = SqliteDatabase(self.path)
         self.shared.connection.execute("PRAGMA foreign_keys=ON")
+        self.owns_shared = True
+
+    @classmethod
+    async def open(cls, database, instance, *, retention_days=None, recover=True):
+        """A store on any database interface, such as D1, with no local file.
+
+        Recovery marks unfinished work from a previous run as interrupted. Only the one
+        process that owns scheduled work may do it; a hosted web request passes
+        ``recover=False`` so it never interrupts work another request is doing.
+        """
+        self = cls.__new__(cls)
+        self.path, self.db, self.shared, self.owns_shared = None, None, database, False
+        self.instance, self.retention_days = instance, retention_days
+        await ensure_schema(database)
+        await database.run("INSERT OR IGNORE INTO instances(id) VALUES(?)", (instance,))
+        if recover:
+            for sql, params in recovery_steps(instance, time.time()):
+                await database.run(sql, params)
+        await self.ensure_chief()
+        return self
 
     def memory_index_path(self, state):
         row = self.db.execute(
@@ -378,9 +403,10 @@ class Store:
         ).fetchall()
 
     def close(self):
-        if hasattr(self, "shared"):
+        if getattr(self, "owns_shared", False):
             self.shared.close_now()
-        self.db.close()
+        if self.db is not None:
+            self.db.close()
 
     def conversation_now(self, chat, user, thread=0):
         """conversation() for offline operator steps that already hold a write transaction."""
