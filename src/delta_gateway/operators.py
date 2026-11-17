@@ -296,6 +296,11 @@ async def operator_command(options):
 
         await command(config, options)
         return
+    if options.command == "runner":
+        from delta_gateway.runner import command
+
+        await command(config, options)
+        return
     if options.command == "skills":
         from delta_gateway.skills_cli import command
 

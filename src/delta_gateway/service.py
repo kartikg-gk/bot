@@ -57,7 +57,7 @@ HELP = (
 
 
 class Service:
-    def __init__(self, config, telegram, *, factory=None, plugins=None):
+    def __init__(self, config, telegram, *, factory=None, plugins=None, store=None):
         self.config, self.telegram = config, telegram
         self.tracer = TraceExporter.from_env()
         self.web = None
@@ -65,10 +65,13 @@ class Service:
             from delta_gateway.web import WebChannel
 
             self.telegram = WebChannel(None if config.web_only else telegram)
-        self.store = Store(
-            config.database_path, config.instance, retention_days=config.retention_days
-        )
-        self.store.activate()
+        if store is None:
+            store = Store(
+                config.database_path, config.instance, retention_days=config.retention_days
+            )
+            store.activate()
+        # A store opened on a shared database (hosted) is passed in instead.
+        self.store = store
         self.runs = None
         self.run_tasks = {}
         if config.web_port is not None:
