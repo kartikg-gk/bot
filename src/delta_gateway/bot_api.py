@@ -1,13 +1,19 @@
 """Authenticated web operations for bot profiles and their own conversations."""
 
 import asyncio
-import sqlite3
 from dataclasses import asdict
 
 from aiohttp import web
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from delta_gateway.bot_profiles import profile, record_chat, reserve, save_profile
+from delta_gateway.bot_profiles import (
+    profile,
+    record_chat,
+    reserve,
+    save_profile,
+    validate_profile,
+)
+from delta_gateway.database import ConstraintError
 from delta_gateway.web import ResourceScope, reply_markup
 
 
@@ -53,10 +59,10 @@ class BotAPI(ResourceScope):
             raise web.HTTPBadRequest(text="A name and purpose must contain text")
         return values
 
-    def view(self, bot):
+    async def view(self, bot):
         return {
             **asdict(bot),
-            **profile(self.store, bot),
+            **await profile(self.store, bot),
             "busy": bot.id in self.sessions.active_bots,
         }
 
@@ -65,15 +71,21 @@ class BotAPI(ResourceScope):
 
         selected = (await self.store.conversation(WEB_CHAT, self.server.actor)).bot
         return web.json_response(
-            [{**self.view(bot), "selected": bot.id == selected} for bot in await self.store.bots()]
+            [
+                {**await self.view(bot), "selected": bot.id == selected}
+                for bot in await self.store.bots()
+            ]
         )
 
     async def reply_counts(self, request):
-        rows = self.store.db.execute(
-            "SELECT bot,count(*) FROM bot_chat WHERE instance=? AND role='assistant' GROUP BY bot",
+        rows = await self.store.shared.query(
+            "SELECT bot,count(*) AS n FROM bot_chat WHERE instance=? AND role='assistant' "
+            "GROUP BY bot",
             (self.store.instance,),
         )
-        return web.json_response(dict(rows), headers={"Cache-Control": "no-store"})
+        return web.json_response(
+            {row["bot"]: row["n"] for row in rows}, headers={"Cache-Control": "no-store"}
+        )
 
     async def create(self, request):
         values = await self.changes(request)
@@ -83,15 +95,14 @@ class BotAPI(ResourceScope):
             bot = await self.store.create_bot(
                 values["name"], values["role"], values.get("instructions", "")
             )
-            with self.store.db:
-                save_profile(
-                    self.store,
-                    bot,
-                    {k: v for k, v in values.items() if k in {"style", "voice", "color", "shape"}},
-                )
-        except (ValueError, sqlite3.IntegrityError):
+            await save_profile(
+                self.store,
+                bot,
+                {k: v for k, v in values.items() if k in {"style", "voice", "color", "shape"}},
+            )
+        except (ValueError, ConstraintError):
             raise web.HTTPConflict(text="That bot name is already in use") from None
-        return web.json_response(self.view(bot), status=201)
+        return web.json_response(await self.view(bot), status=201)
 
     async def update(self, request):
         bot = await self.bot(request)
@@ -99,50 +110,45 @@ class BotAPI(ResourceScope):
         try:
             with reserve(self.sessions, bot.id):
                 await self.sessions.restart_idle(bot.id)
-                with self.store.db:
-                    self.store.db.execute(
-                        "UPDATE bots SET name=?,name_key=?,role=?,instructions=?"
-                        " WHERE instance=? AND id=?",
-                        (
-                            values.get("name", bot.name).strip(),
-                            values.get("name", bot.name).strip().casefold(),
-                            values.get("role", bot.role),
-                            values.get("instructions", bot.instructions),
-                            self.store.instance,
-                            bot.id,
-                        ),
-                    )
-                    save_profile(
-                        self.store,
-                        bot,
-                        {
-                            k: v
-                            for k, v in values.items()
-                            if k in {"style", "voice", "color", "shape"}
-                        },
-                    )
-        except (ValueError, RuntimeError, sqlite3.IntegrityError) as error:
+                # Profile values are checked first, so a rejected profile leaves the bot as it was.
+                changes = {
+                    k: v for k, v in values.items() if k in {"style", "voice", "color", "shape"}
+                }
+                check = {**await profile(self.store, bot), **changes}
+                validate_profile(check)
+                await self.store.shared.run(
+                    "UPDATE bots SET name=?,name_key=?,role=?,instructions=?"
+                    " WHERE instance=? AND id=?",
+                    (
+                        values.get("name", bot.name).strip(),
+                        values.get("name", bot.name).strip().casefold(),
+                        values.get("role", bot.role),
+                        values.get("instructions", bot.instructions),
+                        self.store.instance,
+                        bot.id,
+                    ),
+                )
+                await save_profile(self.store, bot, changes)
+        except (ValueError, RuntimeError, ConstraintError) as error:
             raise web.HTTPConflict(text=str(error)) from None
-        return web.json_response(self.view(await self.store.bot(bot.id)))
+        return web.json_response(await self.view(await self.store.bot(bot.id)))
 
     async def delete(self, request):
         bot = await self.bot(request)
         if bot.chief:
             raise web.HTTPConflict(text="The chief can be edited but cannot be deleted")
-        pending = self.store.db.execute(
+        pending = await self.store.shared.query(
             "SELECT 1 FROM inbox i JOIN routes r ON r.instance=i.instance AND r.chat=i.chat "
             "AND r.user=coalesce(i.route_user,i.user) AND r.thread=i.thread "
             "WHERE r.instance=? AND r.bot=? "
             "AND i.status IN ('pending','prompt','scheduled') LIMIT 1",
             (self.store.instance, bot.id),
-        ).fetchone()
-        queued = any(
-            tuple(row) in self.service.jobs
-            for row in self.store.db.execute(
-                "SELECT chat,user,thread FROM routes WHERE instance=? AND bot=?",
-                (self.store.instance, bot.id),
-            )
         )
+        routes = await self.store.shared.query(
+            "SELECT chat,user,thread FROM routes WHERE instance=? AND bot=?",
+            (self.store.instance, bot.id),
+        )
+        queued = any(tuple(row.values()) in self.service.jobs for row in routes)
         if pending or queued:
             raise web.HTTPConflict(
                 text="Finish or cancel this bot's queued messages before deleting it"
@@ -153,37 +159,30 @@ class BotAPI(ResourceScope):
                 computer = self.sessions.computer_for(bot)
                 if hasattr(computer, "remove"):
                     await computer.remove()
-                # Read before the write transaction; awaiting inside it would block the file.
                 chief = (await self.store.bots())[0].id
-                with self.store.db:
-                    for table in (
-                        "bot_profiles",
-                        "bot_sessions",
-                        "bot_chat",
-                        "bot_plugins",
-                        "route_bots",
-                    ):
-                        clause = (
-                            "route IN (SELECT id FROM routes WHERE instance=?) AND bot=?"
-                            if table == "route_bots"
-                            else "instance=? AND bot=?"
-                        )
-                        self.store.db.execute(
-                            f"DELETE FROM {table} WHERE {clause}", (self.store.instance, bot.id)
-                        )
-                    self.store.db.execute(
-                        "UPDATE jobs SET status='cancelled',next_run=NULL"
-                        " WHERE instance=? AND bot=? AND status IN ('active','paused')",
-                        (self.store.instance, bot.id),
+                shared, instance = self.store.shared, self.store.instance
+                # Each step is safe to repeat; the bot row goes last, so an interrupted
+                # delete can simply be run again.
+                for table in ("bot_profiles", "bot_sessions", "bot_chat", "bot_plugins"):
+                    await shared.run(
+                        f"DELETE FROM {table} WHERE instance=? AND bot=?", (instance, bot.id)
                     )
-                    self.store.db.execute(
-                        "UPDATE routes SET bot=?,session=NULL,session_file=NULL"
-                        " WHERE instance=? AND bot=?",
-                        (chief, self.store.instance, bot.id),
-                    )
-                    self.store.db.execute(
-                        "DELETE FROM bots WHERE instance=? AND id=?", (self.store.instance, bot.id)
-                    )
+                await shared.run(
+                    "DELETE FROM route_bots WHERE route IN (SELECT id FROM routes WHERE "
+                    "instance=?) AND bot=?",
+                    (instance, bot.id),
+                )
+                await shared.run(
+                    "UPDATE jobs SET status='cancelled',next_run=NULL,version=version+1"
+                    " WHERE instance=? AND bot=? AND status IN ('active','paused')",
+                    (instance, bot.id),
+                )
+                await shared.run(
+                    "UPDATE routes SET bot=?,session=NULL,session_file=NULL"
+                    " WHERE instance=? AND bot=?",
+                    (chief, instance, bot.id),
+                )
+                await shared.run("DELETE FROM bots WHERE instance=? AND id=?", (instance, bot.id))
                 self.sessions.computers.pop(bot.id, None)
         except (ValueError, RuntimeError, OSError) as error:
             raise web.HTTPConflict(text=str(error)) from None
@@ -201,33 +200,33 @@ class BotAPI(ResourceScope):
         if (route.chat, route.user, route.thread) in self.service.jobs or pending:
             raise web.HTTPConflict(text="Wait for the current conversation to finish")
         await self.sessions.switch_bot(route, bot, resume_bot=True)
-        return web.json_response(self.view(bot))
+        return web.json_response(await self.view(bot))
 
     async def messages(self, request):
         bot = await self.bot(request)
-        rows = self.store.db.execute(
+        rows = await self.store.shared.query(
             "SELECT role,text FROM bot_chat WHERE instance=? AND bot=? ORDER BY id DESC LIMIT 200",
             (self.store.instance, bot.id),
-        ).fetchall()
-        messages = [dict(role=role, text=text) for role, text in reversed(rows)]
+        )
+        messages = [dict(row) for row in reversed(rows)]
         return web.json_response(
             [reply_markup(row) if row["role"] == "assistant" else row for row in messages]
         )
 
     async def export(self, request):
         bot = await self.bot(request)
-        rows = self.store.db.execute(
+        rows = await self.store.shared.query(
             "SELECT role,text FROM bot_chat WHERE instance=? AND bot=? ORDER BY id",
             (self.store.instance, bot.id),
         )
         return web.json_response(
-            [dict(role=role, text=text) for role, text in rows],
+            [dict(row) for row in rows],
             headers={"Cache-Control": "no-store"},
         )
 
     async def greeting(self, request):
         bot = await self.bot(request)
-        saved = profile(self.store, bot)["greeting"]
+        saved = (await profile(self.store, bot))["greeting"]
         if saved:
             return web.json_response({"text": saved})
         if bot.id in self.sessions.active_bots:
@@ -249,12 +248,11 @@ class BotAPI(ResourceScope):
             raise web.HTTPConflict(text="This bot is unavailable or working") from None
         if outcome != "completed":
             raise web.HTTPServiceUnavailable(text="Greeting generation failed")
-        with self.store.db:
-            settings = profile(self.store, bot)
-            save_profile(self.store, bot, settings)
-            self.store.db.execute(
-                "UPDATE bot_profiles SET greeting=? WHERE instance=? AND bot=?",
-                (text, self.store.instance, bot.id),
-            )
-        record_chat(self.store, bot.id, "assistant", text)
+        settings = await profile(self.store, bot)
+        await save_profile(self.store, bot, settings)
+        await self.store.shared.run(
+            "UPDATE bot_profiles SET greeting=? WHERE instance=? AND bot=?",
+            (text, self.store.instance, bot.id),
+        )
+        await record_chat(self.store, bot.id, "assistant", text)
         return web.json_response({"text": text})

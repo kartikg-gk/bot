@@ -13,62 +13,62 @@ def enabled(db, instance):
     return bool(row[0]) if row else True
 
 
-def set_enabled(db, instance, value):
-    with db:
-        db.execute(
-            "INSERT INTO job_automation VALUES(?,?) ON CONFLICT(instance) "
-            "DO UPDATE SET enabled=excluded.enabled",
-            (instance, int(value)),
-        )
+async def set_enabled(db, instance, value):
+    await db.run(
+        "INSERT INTO job_automation VALUES(?,?) ON CONFLICT(instance) "
+        "DO UPDATE SET enabled=excluded.enabled",
+        (instance, int(value)),
+    )
 
 
-def receive(db, instance, actor, name, delivery):
+async def receive(db, instance, actor, name, delivery):
     if not isinstance(name, str) or not EVENT_NAME.fullmatch(name):
         raise ValueError("Provide an event name using lowercase letters, numbers, dots or dashes")
     if not isinstance(delivery, str) or not DELIVERY_ID.fullmatch(delivery):
         raise ValueError("Provide a stable delivery ID up to 128 characters")
-    with db:
-        db.execute("BEGIN IMMEDIATE")
-        if not enabled(db, instance):
-            raise RuntimeError("Automatic wake-ups are disabled")
-        previous = db.execute(
-            "SELECT 1 FROM job_event_receipts WHERE instance=? AND actor=? "
-            "AND event=? AND delivery=?",
-            (instance, actor, name, delivery),
-        ).fetchone()
-        if previous:
-            return {"accepted": 0, "duplicate": True}
-        (queued,) = db.execute(
-            "SELECT count(*) FROM job_wakeups WHERE instance=? AND actor=? AND status='queued'",
+    if not await automation_on(db, instance):
+        raise RuntimeError("Automatic wake-ups are disabled")
+    now = time.time()
+    # The receipt is the deduplication: only the first delivery of an ID inserts it.
+    if not await db.run(
+        "INSERT OR IGNORE INTO job_event_receipts VALUES(?,?,?,?,?)",
+        (instance, actor, name, delivery, now),
+    ):
+        return {"accepted": 0, "duplicate": True}
+    queued = (
+        await db.query(
+            "SELECT count(*) AS n FROM job_wakeups WHERE instance=? AND actor=? "
+            "AND status='queued'",
             (instance, actor),
-        ).fetchone()
-        jobs = db.execute(
-            "SELECT id FROM jobs WHERE instance=? AND actor=? AND status='active' AND spec=?",
-            (instance, actor, "event:" + name),
-        ).fetchall()
-        if queued + len(jobs) > MAX_QUEUED:
-            raise RuntimeError("The automatic wake-up queue is full")
-        now = time.time()
-        db.execute(
-            "INSERT INTO job_event_receipts VALUES(?,?,?,?,?)",
-            (instance, actor, name, delivery, now),
         )
-        db.executemany(
+    )[0]["n"]
+    jobs = await db.query(
+        "SELECT id FROM jobs WHERE instance=? AND actor=? AND status='active' AND spec=?",
+        (instance, actor, "event:" + name),
+    )
+    if queued + len(jobs) > MAX_QUEUED:
+        # Forget the receipt so the same delivery can be retried once there is room.
+        await db.run(
+            "DELETE FROM job_event_receipts WHERE instance=? AND actor=? AND event=? "
+            "AND delivery=?",
+            (instance, actor, name, delivery),
+        )
+        raise RuntimeError("The automatic wake-up queue is full")
+    for job in jobs:
+        await db.run(
             "INSERT INTO job_wakeups(instance,actor,job,event,delivery,received) "
             "VALUES(?,?,?,?,?,?)",
-            [(instance, actor, job, name, delivery, now) for (job,) in jobs],
+            (instance, actor, job["id"], name, delivery, now),
         )
-        return {"accepted": len(jobs), "duplicate": False}
+    return {"accepted": len(jobs), "duplicate": False}
 
 
-def history(db, instance, job):
-    rows = db.execute(
+async def history(db, instance, job):
+    return await db.query(
         "SELECT event,delivery,received,claimed,finished,status FROM job_wakeups "
         "WHERE instance=? AND job=? ORDER BY id DESC LIMIT 20",
         (instance, job),
     )
-    keys = ("event", "delivery", "received", "claimed", "finished", "status")
-    return [dict(zip(keys, row, strict=True)) for row in rows]
 
 
 def interrupted(db, instance, now):

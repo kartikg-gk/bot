@@ -61,7 +61,7 @@ async def test_desktop_cli_status_resolves_real_loopback_port_and_scheduler(
         assert result["dashboard"] == "http://127.0.0.1:15111/"
         assert result["scheduler"]["state"] == "online"
         assert "token" not in result
-        set_enabled(store.db, cfg.instance, False)
+        await set_enabled(store.shared, cfg.instance, False)
         await operator_command(args)
         assert json.loads(capsys.readouterr().out)["scheduler"]["state"] == "paused"
     finally:

@@ -16,32 +16,21 @@ STYLES = {
 }
 
 
-def profile(store, bot):
-    row = store.db.execute(
+async def profile(store, bot):
+    rows = await store.shared.query(
         "SELECT style,voice,color,shape,greeting FROM bot_profiles WHERE instance=? AND bot=?",
         (store.instance, bot.id),
-    ).fetchone()
-    if row:
-        return dict(zip(("style", "voice", "color", "shape", "greeting"), row, strict=True))
+    )
+    if rows:
+        return dict(rows[0])
     return dict(style="direct", voice="", color="#" + bot.id[:6], shape="orb", greeting=None)
 
 
-def save_profile(store, bot, values):
-    import re
-
-    current = profile(store, bot)
+async def save_profile(store, bot, values):
+    current = await profile(store, bot)
     current.update(values)
-    if current["style"] not in STYLES:
-        raise ValueError("Choose a supported speaking style")
-    if not isinstance(current["voice"], str) or len(current["voice"]) > 2000:
-        raise ValueError("Voice instructions must be at most 2000 characters")
-    if not isinstance(current["color"], str) or not re.fullmatch(
-        r"#[0-9a-fA-F]{6}", current["color"]
-    ):
-        raise ValueError("Choose a six-digit hexadecimal color")
-    if current["shape"] not in {"orb", "diamond", "square"}:
-        raise ValueError("Choose a supported avatar shape")
-    store.db.execute(
+    validate_profile(current)
+    await store.shared.run(
         "INSERT INTO bot_profiles VALUES(?,?,?,?,?,?,NULL) "
         "ON CONFLICT(instance,bot) DO UPDATE SET style=excluded.style,voice=excluded.voice,"
         "color=excluded.color,shape=excluded.shape,greeting=NULL",
@@ -54,6 +43,21 @@ def save_profile(store, bot, values):
             current["shape"],
         ),
     )
+
+
+def validate_profile(current):
+    import re
+
+    if current["style"] not in STYLES:
+        raise ValueError("Choose a supported speaking style")
+    if not isinstance(current["voice"], str) or len(current["voice"]) > 2000:
+        raise ValueError("Voice instructions must be at most 2000 characters")
+    if not isinstance(current["color"], str) or not re.fullmatch(
+        r"#[0-9a-fA-F]{6}", current["color"]
+    ):
+        raise ValueError("Choose a six-digit hexadecimal color")
+    if current["shape"] not in {"orb", "diamond", "square"}:
+        raise ValueError("Choose a supported avatar shape")
 
 
 @contextmanager
@@ -96,26 +100,24 @@ def bot_operation(function):
     return run
 
 
-def remember_session(store, bot_id, state):
-    with store.db:
-        store.db.execute(
-            "INSERT INTO bot_sessions VALUES(?,?,?) ON CONFLICT(instance,bot) "
-            "DO UPDATE SET session_file=excluded.session_file",
-            (store.instance, bot_id, state.get("sessionFile")),
-        )
+async def remember_session(store, bot_id, state):
+    await store.shared.run(
+        "INSERT INTO bot_sessions VALUES(?,?,?) ON CONFLICT(instance,bot) "
+        "DO UPDATE SET session_file=excluded.session_file",
+        (store.instance, bot_id, state.get("sessionFile")),
+    )
 
 
-def saved_session(store, bot_id):
-    row = store.db.execute(
+async def saved_session(store, bot_id):
+    rows = await store.shared.query(
         "SELECT session_file FROM bot_sessions WHERE instance=? AND bot=?",
         (store.instance, bot_id),
-    ).fetchone()
-    return row[0] if row else None
+    )
+    return rows[0]["session_file"] if rows else None
 
 
-def record_chat(store, bot_id, role, text):
-    with store.db:
-        store.db.execute(
-            "INSERT INTO bot_chat(instance,bot,role,text) VALUES(?,?,?,?)",
-            (store.instance, bot_id, role, text),
-        )
+async def record_chat(store, bot_id, role, text):
+    await store.shared.run(
+        "INSERT INTO bot_chat(instance,bot,role,text) VALUES(?,?,?,?)",
+        (store.instance, bot_id, role, text),
+    )

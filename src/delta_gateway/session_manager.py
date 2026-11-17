@@ -101,7 +101,7 @@ class SessionManager:
         )
 
     async def signature(self, bot):
-        settings = profile(self.store, bot)
+        settings = await profile(self.store, bot)
         from delta_gateway.bot_skills import load_bot_skills
         from delta_gateway.skill_store import NOTES
 
@@ -135,7 +135,7 @@ class SessionManager:
         async def plugin_definitions():
             return {name: PLUGINS[name].tools for name in await self.enabled_plugins(bot)}
 
-        settings = profile(self.store, bot)
+        settings = await profile(self.store, bot)
         prepared.addition += "\n\nSpeaking style\n" + STYLES[settings["style"]]
         if settings["style"] == "custom":
             prepared.addition += "\n" + settings["voice"]
@@ -219,11 +219,11 @@ class SessionManager:
                     await cached.close()
                     self.clients.pop(identity, None)
             client = await self.client(
-                bot, saved_session(self.store, bot.id) if persist else None, policy=policy
+                bot, await saved_session(self.store, bot.id) if persist else None, policy=policy
             )
             await client.start()
             if persist:
-                record_chat(self.store, bot.id, "user", task)
+                await record_chat(self.store, bot.id, "user", task)
             await client.request("prompt", message=task)
             final = ""
             while True:
@@ -234,8 +234,10 @@ class SessionManager:
                 if kind == "agent_settled":
                     answer = item.get("error") or final
                     if persist:
-                        remember_session(self.store, bot.id, await client.request("get_state"))
-                        record_chat(self.store, bot.id, "assistant", answer)
+                        await remember_session(
+                            self.store, bot.id, await client.request("get_state")
+                        )
+                        await record_chat(self.store, bot.id, "assistant", answer)
                     return answer, item.get("outcome", "completed")
                 if event:
                     await event(client, item)
@@ -250,7 +252,7 @@ class SessionManager:
         state = await client.request("get_state")
         await self.store.persist_route(route, state)
         client.state = state
-        remember_session(self.store, route.bot, state)
+        await remember_session(self.store, route.bot, state)
         return state
 
     @bot_operation
@@ -287,7 +289,7 @@ class SessionManager:
                 arguments["streamingBehavior"] = behavior
             if before_send:
                 await before_send()
-            record_chat(self.store, route.bot, "user", text)
+            await record_chat(self.store, route.bot, "user", text)
             sent = True
             await client.request("prompt", **arguments)
             if accepted:
@@ -313,7 +315,7 @@ class SessionManager:
                     final = item.get("error") or final
                     break
             await self.persist(route, client)
-            record_chat(self.store, route.bot, "assistant", final)
+            await record_chat(self.store, route.bot, "assistant", final)
             return final, outcome
         except (asyncio.CancelledError, Exception):
             if sent and abort_on_error:
@@ -403,14 +405,13 @@ class SessionManager:
     async def switch_bot(self, route, bot, *, resume_bot=False):
         async with self.lock_for(route):
             route = await self.store.switch_bot(route, bot)
-            session = saved_session(self.store, bot.id) if resume_bot else None
+            session = await saved_session(self.store, bot.id) if resume_bot else None
             if session:
-                with self.store.db:
-                    self.store.db.execute(
-                        "UPDATE routes SET session_file=?,session=NULL,title=NULL,"
-                        "provider=NULL,model=NULL,thinking=NULL WHERE instance=? AND id=?",
-                        (session, self.store.instance, route.id),
-                    )
+                await self.store.shared.run(
+                    "UPDATE routes SET session_file=?,session=NULL,title=NULL,"
+                    "provider=NULL,model=NULL,thinking=NULL WHERE instance=? AND id=?",
+                    (session, self.store.instance, route.id),
+                )
                 route = await self.store.get_route(route.id)
             return route
 

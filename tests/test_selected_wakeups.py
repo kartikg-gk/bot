@@ -47,21 +47,26 @@ async def test_event_claims_are_actor_scoped_and_interrupted_work_is_not_replaye
     job = await store.add_job(11, 11, 11, 0, bot.id, "hello", spec, due)
     await store.add_job(22, 22, 22, 0, bot.id, "hello", spec, due)
     timed = await store.add_job(11, 11, 11, 0, bot.id, "timer", "once", now)
-    assert wakeups.receive(store.db, c.instance, 11, "build.done", "one")["accepted"] == 1
-    assert wakeups.receive(store.db, c.instance, 11, "build.done", "two")["accepted"] == 1
-    wakeups.set_enabled(store.db, c.instance, False)
+    assert (await wakeups.receive(store.shared, c.instance, 11, "build.done", "one"))[
+        "accepted"
+    ] == 1
+    assert (await wakeups.receive(store.shared, c.instance, 11, "build.done", "two"))[
+        "accepted"
+    ] == 1
+    await wakeups.set_enabled(store.shared, c.instance, False)
     assert not await store.claim_due(now)
     store.close()
     store = Store(c.database_path, c.instance)
     assert not wakeups.enabled(store.db, c.instance)
-    wakeups.set_enabled(store.db, c.instance, True)
+    await wakeups.set_enabled(store.shared, c.instance, True)
     assert {row.id for row in await store.claim_due(now)} == {job, timed}
     store.close()
     store = Store(c.database_path, c.instance)
     try:
         assert [row.id for row in await store.claim_due(now + 1)] == [job]
         assert [
-            (row["delivery"], row["status"]) for row in wakeups.history(store.db, c.instance, job)
+            (row["delivery"], row["status"])
+            for row in await wakeups.history(store.shared, c.instance, job)
         ] == [("two", "running"), ("one", "interrupted")]
     finally:
         store.close()

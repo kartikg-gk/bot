@@ -1320,11 +1320,10 @@ class Service:
                 await self.notify(task.key, f"Task #{task.id} was interrupted and not replayed.")
         if self.memory:
             # Facts saved before a crash, or whose copy to the index failed, get indexed now.
-            with self.store.db:
-                self.store.db.execute(
-                    "UPDATE memory_facts SET sync_errors=0 WHERE instance=? AND indexed=0",
-                    (self.config.instance,),
-                )
+            await self.store.shared.run(
+                "UPDATE memory_facts SET sync_errors=0 WHERE instance=? AND indexed=0",
+                (self.config.instance,),
+            )
             await self.memory.sync()
         await self.dispatch()
         self.scheduler_task = asyncio.create_task(self.schedule_loop())

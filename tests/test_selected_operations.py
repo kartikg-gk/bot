@@ -24,8 +24,8 @@ async def populated(root, name):
         bot = await store.create_bot("Reader", "Review notes", "Use citations")
         route = await store.switch_bot(await store.conversation(11, 11), bot)
         with store.db:
-            save_profile(store, bot, {"style": "upbeat"})
-        record_chat(store, bot.id, "assistant", name)
+            await save_profile(store, bot, {"style": "upbeat"})
+        await record_chat(store, bot.id, "assistant", name)
         await store.set_plugin(bot.id, "github", True)
         now = time.time()
         job = await store.add_job(11, 11, 11, 0, bot.id, name, "once", now)
@@ -72,7 +72,7 @@ async def test_populated_instances_keep_bot_identity_and_remap_database_referenc
         store = Store(target, cfg.instance)
         try:
             assert {bot.id for bot in await store.bots()} == {chief_id, bot_id}
-            assert profile(store, await store.bot(bot_id))["style"] == "upbeat"
+            assert (await profile(store, await store.bot(bot_id)))["style"] == "upbeat"
             assert await store.plugins_for(bot_id) == ["github"]
             assert (await store.jobs())[0].last_status == "interrupted"
             assert (await store.tasks())[0].status == "interrupted"

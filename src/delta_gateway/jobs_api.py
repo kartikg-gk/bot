@@ -61,27 +61,25 @@ class JobsAPI(ResourceScope):
         return bot
 
     async def list(self, request):
-        heartbeat = self.store.db.execute(
+        leases = await self.store.shared.query(
             "SELECT heartbeat,expires FROM scheduler_leases WHERE instance=?",
             (self.store.instance,),
-        ).fetchone()
+        )
         return web.json_response(
             {
-                "automation": wakeups.enabled(self.store.db, self.store.instance),
+                "automation": await wakeups.automation_on(self.store.shared, self.store.instance),
                 "jobs": [
                     await self.view(job)
                     for job in await self.store.jobs(actor=self.server.actor, history=True)
                 ],
-                "scheduler": dict(zip(("heartbeat", "expires"), heartbeat, strict=True))
-                if heartbeat
-                else None,
+                "scheduler": leases[0] if leases else None,
             }
         )
 
     async def details(self, request):
         job = await self.job(request)
         data = await self.view(job, answer=True)
-        data["wakeups"] = wakeups.history(self.store.db, self.store.instance, job.id)
+        data["wakeups"] = await wakeups.history(self.store.shared, self.store.instance, job.id)
         return web.json_response(data)
 
     async def automation(self, request):
@@ -95,7 +93,7 @@ class JobsAPI(ResourceScope):
             or type(body["enabled"]) is not bool
         ):
             raise web.HTTPBadRequest(text="Provide a Boolean enabled setting")
-        wakeups.set_enabled(self.store.db, self.store.instance, body["enabled"])
+        await wakeups.set_enabled(self.store.shared, self.store.instance, body["enabled"])
         if body["enabled"]:
             await self.service.run_due()
         return web.json_response(body)
@@ -105,8 +103,8 @@ class JobsAPI(ResourceScope):
             body = await request.json()
             if not isinstance(body, dict) or set(body) != {"event", "delivery"}:
                 raise ValueError("Provide an event name and a stable delivery ID")
-            result = wakeups.receive(
-                self.store.db,
+            result = await wakeups.receive(
+                self.store.shared,
                 self.store.instance,
                 self.server.actor,
                 body["event"],

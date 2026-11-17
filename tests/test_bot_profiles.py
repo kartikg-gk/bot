@@ -101,13 +101,15 @@ async def test_profiles_survive_reopen_and_defaults_differ(web):
     service, _, _ = web
     bot = await service.store.create_bot("Reader", "Read documents")
     chief = (await service.store.bots())[0]
-    assert profile(service.store, chief)["color"] != profile(service.store, bot)["color"]
+    assert (await profile(service.store, chief))["color"] != (await profile(service.store, bot))[
+        "color"
+    ]
     with service.store.db:
-        save_profile(service.store, bot, {"style": "thoughtful", "shape": "diamond"})
+        await save_profile(service.store, bot, {"style": "thoughtful", "shape": "diamond"})
     reopened = Store(service.config.database_path, service.config.instance)
     try:
-        assert profile(reopened, bot)["style"] == "thoughtful"
-        assert profile(reopened, bot)["shape"] == "diamond"
+        assert (await profile(reopened, bot))["style"] == "thoughtful"
+        assert (await profile(reopened, bot))["shape"] == "diamond"
     finally:
         reopened.close()
 
@@ -116,9 +118,9 @@ async def test_greeting_does_not_replace_delegated_session(web):
     service, client, _ = web
     bot = await service.store.create_bot("Reader", "Read documents")
     await service.sessions.delegate(bot, "First task", policy="deny")
-    original = saved_session(service.store, bot.id)
+    original = await saved_session(service.store, bot.id)
     assert (await client.post("/api/bots/" + bot.id + "/greeting")).status_code == 200
-    assert saved_session(service.store, bot.id) == original
+    assert await saved_session(service.store, bot.id) == original
     rows = (await client.get("/api/bots/" + bot.id + "/messages")).json()
     assert [r["text"] for r in rows if r["role"] == "user"] == ["First task"]
 
@@ -130,6 +132,6 @@ async def test_rename_collision_rolls_back_profile_and_busy_delete_is_refused(we
     response = await client.patch("/api/bots/" + bot.id, json={"name": "Writer", "style": "upbeat"})
     assert response.status_code == 409
     assert (await service.store.bot(bot.id)).name == "Reader"
-    assert profile(service.store, bot)["style"] == "direct"
+    assert (await profile(service.store, bot))["style"] == "direct"
     with reserve(service.sessions, bot.id):
         assert (await client.delete("/api/bots/" + bot.id)).status_code == 409

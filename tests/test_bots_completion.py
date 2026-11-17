@@ -20,7 +20,7 @@ async def test_own_instruction_update_invalidates_saved_greeting(web):
     service, _, _ = web
     bot = await service.store.create_bot("Reader", "Read documents")
     with service.store.db:
-        save_profile(service.store, bot, {})
+        await save_profile(service.store, bot, {})
         service.store.db.execute(
             "UPDATE bot_profiles SET greeting='Old greeting' WHERE bot=?", (bot.id,)
         )
@@ -30,7 +30,7 @@ async def test_own_instruction_update_invalidates_saved_greeting(web):
         await service.store.conversation(11, 11),
         bot=bot,
     )
-    assert profile(service.store, bot)["greeting"] is None
+    assert (await profile(service.store, bot))["greeting"] is None
 
 
 async def test_cancelled_computer_process_is_killed_and_reaped():
