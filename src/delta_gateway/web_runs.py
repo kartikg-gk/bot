@@ -33,29 +33,34 @@ class RunJournal:
         for (run,) in rows:
             self.finish(run)
 
-    def route(self, chat, actor, bot):
+    async def route(self, chat, actor, bot):
         if bot is None:
-            return self.store.conversation(chat, actor)
-        with self.db:
-            self.db.execute(
-                "INSERT OR IGNORE INTO web_bot_routes(instance,actor,bot,thread) "
-                "SELECT ?,?,?,coalesce(max(thread),0)+1 FROM web_bot_routes "
-                "WHERE instance=? AND actor=?",
-                (self.instance, actor, bot.id, self.instance, actor),
+            return await self.store.conversation(chat, actor)
+        shared = self.store.shared
+        await shared.run(
+            "INSERT OR IGNORE INTO web_bot_routes(instance,actor,bot,thread) "
+            "SELECT ?,?,?,coalesce(max(thread),0)+1 FROM web_bot_routes "
+            "WHERE instance=? AND actor=?",
+            (self.instance, actor, bot.id, self.instance, actor),
+        )
+        rows = await shared.query(
+            "SELECT thread FROM web_bot_routes WHERE instance=? AND actor=? AND bot=?",
+            (self.instance, actor, bot.id),
+        )
+        route = await self.store.conversation(chat, actor, rows[0]["thread"])
+        if route.bot != bot.id:
+            await shared.run(
+                "UPDATE routes SET bot=? WHERE instance=? AND id=?",
+                (bot.id, self.instance, route.id),
             )
-            (thread,) = self.db.execute(
-                "SELECT thread FROM web_bot_routes WHERE instance=? AND actor=? AND bot=?",
-                (self.instance, actor, bot.id),
-            ).fetchone()
-            route = self.store.conversation(chat, actor, thread)
-            if route.bot != bot.id:
-                self.db.execute("UPDATE routes SET bot=? WHERE id=?", (bot.id, route.id))
-                route = self.store.get_route(route.id)
+            route = await self.store.get_route(route.id)
         return route
 
-    def queue(self, route, text, base):
+    async def queue(self, route, text, base):
         run = uuid4().hex
-        inbox = self.store.admit_web(route.chat, route.user, text, base=base, route=route, run=run)
+        inbox = await self.store.admit_web(
+            route.chat, route.user, text, base=base, route=route, run=run
+        )
         return run, inbox
 
     def _rows(self, condition, parameters):
@@ -165,11 +170,11 @@ class RunJournal:
             self._append(run, "run_finished", result)
         self._wake(run)
 
-    def cancel(self, run, actor):
+    async def cancel(self, run, actor):
         row = self._rows("r.id=? AND r.actor=?", (run, actor)).fetchone()
         if not row or row[4] not in ACTIVE or row[4] == "cancelling":
             return False
-        self.store.mark(row[3], "cancelling")
+        await self.store.mark(row[3], "cancelling")
         return True
 
     def events(self, run, after):

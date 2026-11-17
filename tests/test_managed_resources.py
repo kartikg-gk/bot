@@ -132,7 +132,7 @@ async def test_skill_and_notes_changes_refresh_next_engine(web):
     service, _, _ = web
     manager, store = service.sessions, service.store
     bot = await store.create_bot("Reader", "Read documents")
-    route = store.switch_bot(store.conversation(11, 11), bot)
+    route = await store.switch_bot(await store.conversation(11, 11), bot)
     await manager.prompt(route, "hello")
     old = next(iter(manager.clients.values()))
     team = Team(store, manager)
@@ -182,7 +182,7 @@ async def test_computer_is_lazy_and_stops_at_task_end(web):
     service, _, _ = web
     service.config.policy = "auto"
     bot = (await service.store.bots())[0]
-    route = service.store.conversation(11, 11)
+    route = await service.store.conversation(11, 11)
     base = CountComputer(service.config.project)
     base.memory_path = str(service.config.state / "bots" / bot.id / "memory")
     managed = ManagedComputer(base)
@@ -205,7 +205,9 @@ async def test_computer_releases_on_cancel_and_handles_parallel_acquisition(web)
     service.sessions.computers[bot.id] = managed
     await asyncio.gather(managed.start(), managed.start())
     assert base.starts == 1
-    task = asyncio.create_task(service.sessions.prompt(service.store.conversation(11, 11), "slow"))
+    task = asyncio.create_task(
+        service.sessions.prompt(await service.store.conversation(11, 11), "slow")
+    )
     async with asyncio.timeout(5):
         while bot.id not in service.sessions.active_bots:
             await asyncio.sleep(0.01)
@@ -279,7 +281,7 @@ async def test_managed_note_write_is_mirrored_to_acquired_remote_memory(web, tmp
     await Team(service.store, service.sessions).run(
         "write_memory",
         {"file": "KNOWLEDGE.md", "text": "Reviewed fact"},
-        service.store.conversation(11, 11),
+        await service.store.conversation(11, 11),
         bot=bot,
     )
     assert (tmp_path / "remote-notes" / "KNOWLEDGE.md").read_text() == "Reviewed fact"

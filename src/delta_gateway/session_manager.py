@@ -19,6 +19,7 @@ from delta_gateway.computer import DockerComputer, LocalComputer, ManagedCompute
 from delta_gateway.embedded import EmbeddedClient
 from delta_gateway.errors import RequestRejected, WorkerLost
 from delta_gateway.plugins import PLUGINS
+from delta_gateway.store import Conversation
 
 DURABLE_REVIEW = ContextVar("durable_review", default=True)
 
@@ -162,7 +163,7 @@ class SessionManager:
 
     async def client_for(self, route, *, fresh_if_missing=False):
         async with self.creation:
-            current = self.store.get_route(route.id)
+            current = await self.store.get_route(route.id)
             original_identity = self.identity(current)
             if current.session_file and not Path(current.session_file).is_file():
                 if not fresh_if_missing:
@@ -172,7 +173,7 @@ class SessionManager:
             bot = await self.store.bot(current.bot)
             client = self.clients.get(identity)
             if client and not client.failure and client.bot_signature == self.signature(bot):
-                self.store.persist_route(current, client.state)
+                await self.store.persist_route(current, client.state)
                 return client
             if client:
                 await client.close()
@@ -191,7 +192,7 @@ class SessionManager:
             )
             try:
                 await client.start()
-                self.store.persist_route(current, client.state)
+                await self.store.persist_route(current, client.state)
             except BaseException:
                 await client.close()
                 raise
@@ -247,7 +248,7 @@ class SessionManager:
 
     async def persist(self, route, client):
         state = await client.request("get_state")
-        self.store.persist_route(route, state)
+        await self.store.persist_route(route, state)
         client.state = state
         remember_session(self.store, route.bot, state)
         return state
@@ -266,11 +267,11 @@ class SessionManager:
     ):
         # Resolve aliases before locking, then recheck after a session-changing operation.
         while True:
-            route = self.store.get_route(route.id)
+            route = await self.store.get_route(route.id)
             identity = self.identity(route)
             lock = self.lock_for(route)
             await lock.acquire()
-            latest = self.store.get_route(route.id)
+            latest = await self.store.get_route(route.id)
             if self.identity(latest) == identity:
                 route = latest
                 break
@@ -279,18 +280,18 @@ class SessionManager:
         try:
             self.busy.add(identity)
             client = await self.client_for(route)
-            self.busy.add(self.identity(self.store.get_route(route.id)))
+            self.busy.add(self.identity(await self.store.get_route(route.id)))
             client.clear_events()
             arguments = dict(message=text)
             if behavior:
                 arguments["streamingBehavior"] = behavior
             if before_send:
-                before_send()
+                await before_send()
             record_chat(self.store, route.bot, "user", text)
             sent = True
             await client.request("prompt", **arguments)
             if accepted:
-                accepted()
+                await accepted()
             final, preview, outcome = "", "", "completed"
             while True:
                 item = await client.next_event()
@@ -320,14 +321,14 @@ class SessionManager:
             raise
         finally:
             self.busy.discard(identity)
-            current = self.store.get_route(route.id)
+            current = await self.store.get_route(route.id)
             self.busy.discard(self.identity(current))
             self.touched[self.identity(current)] = time.monotonic()
             lock.release()
 
     async def forward(self, route, command, text):
         """Deliver to a running prompt; False means nothing was delivered."""
-        identity = self.identity(self.store.get_route(route.id))
+        identity = self.identity(await self.store.get_route(route.id))
         client = self.clients.get(identity)
         if identity not in self.busy or not client or client.failure:
             return False
@@ -339,18 +340,18 @@ class SessionManager:
 
     @bot_operation
     async def control(self, route, command, *, before_send=None, **arguments):
-        route = self.store.get_route(route.id)
+        route = await self.store.get_route(route.id)
         async with self.lock_for(route):
             identity = self.identity(route)
             self.busy.add(identity)
             try:
                 client = await self.client_for(route, fresh_if_missing=command == "new_session")
-                old_identity = self.identity(self.store.get_route(route.id))
+                old_identity = self.identity(await self.store.get_route(route.id))
                 if before_send:
-                    before_send()
+                    await before_send()
                 data = await client.request(command, timeout=None, **arguments)
                 state = await self.persist(route, client)
-                new_identity = self.identity(self.store.get_route(route.id))
+                new_identity = self.identity(await self.store.get_route(route.id))
                 self.clients.pop(old_identity, None)
                 self.clients[new_identity] = client
                 if command in {"new_session", "clone"}:
@@ -359,7 +360,7 @@ class SessionManager:
                 return data, state
             finally:
                 self.busy.discard(identity)
-                current = self.store.get_route(route.id)
+                current = await self.store.get_route(route.id)
                 self.touched[self.identity(current)] = time.monotonic()
 
     async def state(self, route):
@@ -376,7 +377,7 @@ class SessionManager:
         ), {}
 
     async def abort(self, route):
-        client = self.clients.get(self.identity(self.store.get_route(route.id)))
+        client = self.clients.get(self.identity(await self.store.get_route(route.id)))
         if client and not client.failure:
             try:
                 await client.abort()
@@ -390,20 +391,18 @@ class SessionManager:
             if not source.session_file or not Path(source.session_file).is_file():
                 raise ValueError("That conversation has no saved session")
             old = self.identity(route)
-            route = self.store.point(route, source)
+            route = await self.store.point(route, source)
             if old != self.identity(route) and old in self.clients:
-                if not any(
-                    self.identity(self.store.get_route(row[0])) == old
-                    for row in self.store.db.execute(
-                        "SELECT id FROM routes WHERE instance=?", (self.store.instance,)
-                    )
-                ):
+                routes = await self.store.shared.query(
+                    "SELECT * FROM routes WHERE instance=?", (self.store.instance,)
+                )
+                if not any(self.identity(Conversation(*row.values())) == old for row in routes):
                     await self.clients.pop(old).close()
             return route
 
     async def switch_bot(self, route, bot, *, resume_bot=False):
         async with self.lock_for(route):
-            route = self.store.switch_bot(route, bot)
+            route = await self.store.switch_bot(route, bot)
             session = saved_session(self.store, bot.id) if resume_bot else None
             if session:
                 with self.store.db:
@@ -412,7 +411,7 @@ class SessionManager:
                         "provider=NULL,model=NULL,thinking=NULL WHERE instance=? AND id=?",
                         (session, self.store.instance, route.id),
                     )
-                route = self.store.get_route(route.id)
+                route = await self.store.get_route(route.id)
             return route
 
     async def remove_computer(self, bot):

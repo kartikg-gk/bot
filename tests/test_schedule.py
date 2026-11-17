@@ -73,7 +73,7 @@ async def wait_jobs(service):
 
 
 async def command(service, c, identifier, text):
-    service.store.admit([update(identifier, text)], c)
+    await service.store.admit([update(identifier, text)], c)
     await service.dispatch()
     await settle(service)
 
@@ -94,7 +94,7 @@ async def test_due_job_runs_as_its_bot_and_reports_to_chat(tmp_path):
         row = service.store.job(rows[0].id)
         assert row.last_status == "completed" and row.next_run > time.time()
         assert any("Researcher" in text and "done" in text for _, text, _ in telegram.sent)
-        route = service.store.conversation(11, 11)
+        route = await service.store.conversation(11, 11)
         assert route.session is None
     finally:
         await service.close()
@@ -136,7 +136,7 @@ async def test_chief_tools_schedule_for_the_current_chat(tmp_path):
     c = config(tmp_path)
     service = Service(c, Bot(), factory="tests.fake_session:create")
     try:
-        route = service.store.conversation(11, 11)
+        route = await service.store.conversation(11, 11)
         await service.team.run("schedule_job", dict(when="every 1h", task="check"), route, actor=11)
         job = service.store.jobs()[0]
         assert (job.chat, job.actor, job.task) == (11, 11, "check")

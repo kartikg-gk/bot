@@ -18,7 +18,7 @@ def store(tmp_path):
 async def test_new_instance_has_one_chief(store):
     bots = await store.bots()
     assert [bot.name for bot in bots] == ["Chief of Staff"] and bots[0].chief
-    assert store.conversation(1, 1).bot == bots[0].id
+    assert (await store.conversation(1, 1)).bot == bots[0].id
 
 
 async def test_bot_names_are_unique_regardless_of_case(store):
@@ -30,14 +30,18 @@ async def test_bot_names_are_unique_regardless_of_case(store):
 async def test_switching_keeps_each_bots_session(store):
     other = await store.create_bot("Researcher", "Finds things")
     chief = (await store.bots())[0]
-    route = store.conversation(1, 1)
-    store.persist_route(route, dict(sessionId="s1", sessionFile="s1.jsonl", thinkingLevel="off"))
-    route = store.switch_bot(route, other)
+    route = await store.conversation(1, 1)
+    await store.persist_route(
+        route, dict(sessionId="s1", sessionFile="s1.jsonl", thinkingLevel="off")
+    )
+    route = await store.switch_bot(route, other)
     assert route.bot == other.id and route.session is None and route.session_file is None
-    store.persist_route(route, dict(sessionId="s2", sessionFile="s2.jsonl", thinkingLevel="off"))
-    route = store.switch_bot(route, chief)
+    await store.persist_route(
+        route, dict(sessionId="s2", sessionFile="s2.jsonl", thinkingLevel="off")
+    )
+    route = await store.switch_bot(route, chief)
     assert route.session == "s1" and route.session_file == "s1.jsonl"
-    route = store.switch_bot(route, other)
+    route = await store.switch_bot(route, other)
     assert route.session == "s2"
 
 
@@ -60,7 +64,7 @@ async def test_version_four_database_upgrades(tmp_path):
     db.close()
     store = Store(tmp_path / "state", "a" * 32)
     try:
-        route = store.conversation(1, 1)
+        route = await store.conversation(1, 1)
         assert route.session == "old" and route.bot == (await store.bots())[0].id
     finally:
         store.close()
@@ -78,7 +82,7 @@ async def test_prepare_separates_bot_files(tmp_path, store):
 
 
 async def run(service, c, identifier, text):
-    service.store.admit([update(identifier, text)], c)
+    await service.store.admit([update(identifier, text)], c)
     await service.dispatch()
     await settle(service)
 
@@ -91,10 +95,10 @@ async def test_bot_commands_through_service(tmp_path):
         await run(service, c, 1, "first")
         await run(service, c, 2, "/bot new Researcher | Finds things")
         await run(service, c, 3, "/bot researcher")
-        route = service.store.conversation(11, 11)
+        route = await service.store.conversation(11, 11)
         assert (await service.store.bot(route.bot)).name == "Researcher" and route.session is None
         await run(service, c, 4, "second")
-        assert service.store.conversation(11, 11).session
+        assert (await service.store.conversation(11, 11)).session
         await run(service, c, 5, "/bot")
         assert any("* Researcher" in text for _, text, _ in telegram.sent)
     finally:

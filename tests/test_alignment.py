@@ -38,14 +38,14 @@ async def test_shared_groups_topics_and_audit(tmp_path):
     service, bot = None, Bot()
     try:
         service = Service(c, bot, factory="tests.fake_session:create")
-        service.store.admit([group_update(1, "hello"), group_update(2, "again", actor=22)], c)
+        await service.store.admit([group_update(1, "hello"), group_update(2, "again", actor=22)], c)
         await settle(service)
-        route = service.store.conversation(-100, 0, 7)
+        route = await service.store.conversation(-100, 0, 7)
         assert len(service.sessions.clients) == 1
         assert await service.last(route.key) == "turn 2: done"
-        service.store.admit([group_update(3, "separate", thread=8)], c)
+        await service.store.admit([group_update(3, "separate", thread=8)], c)
         await settle(service)
-        assert service.store.conversation(-100, 0, 8).session != route.session
+        assert (await service.store.conversation(-100, 0, 8)).session != route.session
         assert all(
             kwargs.get("message_thread_id") in {7, 8}
             for chat, text, kwargs in bot.sent
@@ -72,14 +72,14 @@ async def test_aliased_sessions_serialize_and_switch_is_authorized(tmp_path):
     c = config(tmp_path, allow_groups=True, group_mentions_only=False)
     service = Service(c, Bot(), factory="tests.fake_session:create")
     try:
-        service.store.admit([update(1)], c)
+        await service.store.admit([update(1)], c)
         await settle(service)
-        source = service.store.conversation(11, 11)
-        service.store.admit([group_update(2, "/switch " + str(source.id))], c)
+        source = await service.store.conversation(11, 11)
+        await service.store.admit([group_update(2, "/switch " + str(source.id))], c)
         await settle(service)
-        alias = service.store.conversation(-100, 11, 7)
+        alias = await service.store.conversation(-100, 11, 7)
         assert alias.session_file == source.session_file
-        service.store.admit([update(3, "pause")], c)
+        await service.store.admit([update(3, "pause")], c)
         await service.dispatch()
         async with asyncio.timeout(5):
             while not any(
@@ -89,7 +89,7 @@ async def test_aliased_sessions_serialize_and_switch_is_authorized(tmp_path):
                 client = next(iter(service.sessions.clients.values()))
                 client.state = await client.request("get_state")
                 await asyncio.sleep(0.01)
-        service.store.admit([group_update(4, "followup")], c)
+        await service.store.admit([group_update(4, "followup")], c)
         await service.dispatch()
         await asyncio.sleep(0.05)
         assert len(service.sessions.clients) == 1
@@ -97,13 +97,13 @@ async def test_aliased_sessions_serialize_and_switch_is_authorized(tmp_path):
         await settle(service)
         assert await service.last(alias.key) == "turn 3: done"
         assert not service.store.issues()
-        other = service.store.conversation(33, 33)
-        service.store.persist_route(
+        other = await service.store.conversation(33, 33)
+        await service.store.persist_route(
             other, dict(sessionId="other", sessionFile=str(tmp_path / "other.jsonl"))
         )
-        service.store.admit([update(5, "/switch " + str(other.id))], c)
+        await service.store.admit([update(5, "/switch " + str(other.id))], c)
         await settle(service)
-        assert service.store.conversation(11, 11).session == source.session
+        assert (await service.store.conversation(11, 11)).session == source.session
         assert service.store.issues()[-1][2] == "failed"
     finally:
         await service.close()
@@ -113,7 +113,7 @@ async def test_conversation_commands_preserve_arrival_order(tmp_path):
     c, bot = config(tmp_path), Bot()
     service = Service(c, bot, factory="tests.fake_session:create")
     try:
-        service.store.admit([update(1), update(2, "/new"), update(3, "next")], c)
+        await service.store.admit([update(1), update(2, "/new"), update(3, "next")], c)
         await settle(service)
         replies = [text for _, text, _ in bot.sent if text.startswith(("turn", "Started new"))]
         assert replies[0] == "turn 1: done"
@@ -127,10 +127,10 @@ async def test_native_passthrough_and_last_answer_selection(tmp_path):
     c, bot = config(tmp_path), Bot()
     service = Service(c, bot, factory="tests.fake_session:create")
     try:
-        service.store.admit([update(1, "/delta /name user title")], c)
+        await service.store.admit([update(1, "/delta /name user title")], c)
         await settle(service)
-        assert service.store.conversation(11, 11).title == "user title"
-        service.store.admit([update(2, "write")], c)
+        assert (await service.store.conversation(11, 11)).title == "user title"
+        await service.store.admit([update(2, "write")], c)
         await service.dispatch()
         async with asyncio.timeout(5):
             while not service.cards:
@@ -147,7 +147,7 @@ async def test_native_passthrough_and_last_answer_selection(tmp_path):
         assert any(text == "turn 1: done" for _, text, _ in bot.sent)
         assert (tmp_path / "approved.txt").is_file()
         assert any(method == "deleteMessage" for method, _ in bot.edits)
-        service.store.admit([update(3, "/delta /login")], c)
+        await service.store.admit([update(3, "/delta /login")], c)
         await settle(service)
         assert any("failed" in text.lower() for _, text, _ in bot.sent)
     finally:
@@ -198,15 +198,15 @@ def test_path_selection_and_model_default_clear(tmp_path, monkeypatch):
     assert load(local).model is None and load(local).provider is None
 
 
-def test_retention_disabled_by_default(tmp_path):
+async def test_retention_disabled_by_default(tmp_path):
     c = config(tmp_path)
     store = Store(c.database_path, c.instance)
     try:
-        store.admit([update(1)], c)
-        store.mark(1, "completed")
+        await store.admit([update(1)], c)
+        await store.mark(1, "completed")
         store.db.execute("UPDATE inbox SET created=0")
         store.db.commit()
-        store.retain()
+        await store.retain()
         assert store.db.execute("SELECT text FROM inbox").fetchone()[0] == "hello"
     finally:
         store.close()
@@ -221,10 +221,10 @@ async def populated(tmp_path, name):
     register(path, c)
     service = Service(c, Bot(), factory="tests.fake_session:create")
     try:
-        service.store.admit([update(1)], c)
+        await service.store.admit([update(1)], c)
         await settle(service)
-        service.store.admit([update(2, "pending")], c)
-        route = service.store.conversation(11, 11)
+        await service.store.admit([update(2, "pending")], c)
+        route = await service.store.conversation(11, 11)
         return c, path, route.session_file
     finally:
         await service.close()
@@ -251,10 +251,10 @@ async def test_database_consolidation_backups_id_mapping_and_resume(tmp_path):
         assert registry()[c.name]["config"] == str(path.with_suffix(".yaml"))
         store = Store(destination, c.instance)
         try:
-            route = store.conversation(11, 11)
+            route = await store.conversation(11, 11)
             assert route.session_file == session
-            assert len(store.pending()) == 1
-            assert store.offset == 3
+            assert len(await store.pending()) == 1
+            assert await store.offset() == 3
         finally:
             store.close()
     with sqlite3.connect(destination) as db:
@@ -368,7 +368,7 @@ async def test_recovery_discards_stale_answers_and_waits_until_settled(tmp_path,
     c = config(tmp_path)
     store = Store(c.database_path, c.instance)
     manager = SessionManager(c, store)
-    route = store.conversation(11, 11)
+    route = await store.conversation(11, 11)
     events = asyncio.Queue()
 
     class Client:

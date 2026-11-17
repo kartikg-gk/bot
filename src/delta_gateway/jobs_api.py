@@ -127,7 +127,7 @@ class JobsAPI(ResourceScope):
         if not {"bot", "when", "task"} <= values.keys():
             raise web.HTTPBadRequest(text="Choose a bot, timing, and task")
         bot = await self.bot(values["bot"])
-        route = self.store.conversation(WEB_CHAT, self.server.actor)
+        route = await self.store.conversation(WEB_CHAT, self.server.actor)
         try:
             spec, first = parse_when(values["when"])
             identifier = self.store.add_job(

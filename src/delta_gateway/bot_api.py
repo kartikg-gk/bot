@@ -63,7 +63,7 @@ class BotAPI(ResourceScope):
     async def list(self, request):
         from delta_gateway.web import WEB_CHAT
 
-        selected = self.store.conversation(WEB_CHAT, self.server.actor).bot
+        selected = (await self.store.conversation(WEB_CHAT, self.server.actor)).bot
         return web.json_response(
             [{**self.view(bot), "selected": bot.id == selected} for bot in await self.store.bots()]
         )
@@ -153,6 +153,8 @@ class BotAPI(ResourceScope):
                 computer = self.sessions.computer_for(bot)
                 if hasattr(computer, "remove"):
                     await computer.remove()
+                # Read before the write transaction; awaiting inside it would block the file.
+                chief = (await self.store.bots())[0].id
                 with self.store.db:
                     for table in (
                         "bot_profiles",
@@ -177,7 +179,7 @@ class BotAPI(ResourceScope):
                     self.store.db.execute(
                         "UPDATE routes SET bot=?,session=NULL,session_file=NULL"
                         " WHERE instance=? AND bot=?",
-                        ((await self.store.bots())[0].id, self.store.instance, bot.id),
+                        (chief, self.store.instance, bot.id),
                     )
                     self.store.db.execute(
                         "DELETE FROM bots WHERE instance=? AND id=?", (self.store.instance, bot.id)
@@ -191,10 +193,10 @@ class BotAPI(ResourceScope):
         bot = await self.bot(request)
         from delta_gateway.web import WEB_CHAT
 
-        route = self.store.conversation(WEB_CHAT, self.server.actor)
+        route = await self.store.conversation(WEB_CHAT, self.server.actor)
         pending = any(
             row[1] == route.chat and row[2] == route.user and row[5] == route.thread
-            for row in self.store.pending()
+            for row in await self.store.pending()
         )
         if (route.chat, route.user, route.thread) in self.service.jobs or pending:
             raise web.HTTPConflict(text="Wait for the current conversation to finish")

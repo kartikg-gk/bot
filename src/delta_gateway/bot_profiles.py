@@ -76,12 +76,12 @@ def bot_operation(function):
     async def run(manager, target, *args, **kwargs):
         delegated = function.__name__ == "delegate"
         while True:
-            bot_id = target.id if delegated else manager.store.get_route(target.id).bot
+            bot_id = target.id if delegated else (await manager.store.get_route(target.id)).bot
             if bot_id in ACTIVE_BOTS.get():
                 raise ValueError("A bot cannot delegate back into its active workspace")
             lock = manager.bot_locks.setdefault(bot_id, asyncio.Lock())
             async with lock:
-                if not delegated and manager.store.get_route(target.id).bot != bot_id:
+                if not delegated and (await manager.store.get_route(target.id)).bot != bot_id:
                     continue
                 if await manager.store.bot(bot_id) is None:
                     raise ValueError("This bot has been deleted")

@@ -7,13 +7,13 @@ from tests.test_web import web as web
 async def test_delete_does_not_redirect_queued_message_to_chief(web):
     service, client, _ = web
     bot = await service.store.create_bot("Queued", "Keep this work separate")
-    route = service.store.conversation(WEB_CHAT, service.web.actor)
+    route = await service.store.conversation(WEB_CHAT, service.web.actor)
     await service.sessions.switch_bot(route, bot)
-    service.store.admit_web(WEB_CHAT, service.web.actor, "Work for this bot", base=WEB_IDS)
+    await service.store.admit_web(WEB_CHAT, service.web.actor, "Work for this bot", base=WEB_IDS)
     response = await client.delete("/api/bots/" + bot.id)
     assert response.status_code == 409
     assert await service.store.bot(bot.id) == bot
-    assert service.store.get_route(route.id).bot == bot.id
+    assert (await service.store.get_route(route.id)).bot == bot.id
 
 
 async def test_own_instruction_update_invalidates_saved_greeting(web):
@@ -27,7 +27,7 @@ async def test_own_instruction_update_invalidates_saved_greeting(web):
     await Team(service.store, service.sessions).run(
         "update_own_bot",
         {"instructions": "Summarize before answering."},
-        service.store.conversation(11, 11),
+        await service.store.conversation(11, 11),
         bot=bot,
     )
     assert profile(service.store, bot)["greeting"] is None

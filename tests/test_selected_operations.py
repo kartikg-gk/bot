@@ -22,7 +22,7 @@ async def populated(root, name):
     try:
         chief = (await store.bots())[0]
         bot = await store.create_bot("Reader", "Review notes", "Use citations")
-        route = store.switch_bot(store.conversation(11, 11), bot)
+        route = await store.switch_bot(await store.conversation(11, 11), bot)
         with store.db:
             save_profile(store, bot, {"style": "upbeat"})
         record_chat(store, bot.id, "assistant", name)
@@ -76,7 +76,7 @@ async def test_populated_instances_keep_bot_identity_and_remap_database_referenc
             assert store.plugins_for(bot_id) == ["github"]
             assert store.jobs()[0].last_status == "interrupted"
             assert store.tasks()[0].status == "interrupted"
-            route = store.conversation(11, 11)
+            route = await store.conversation(11, 11)
             assert route.bot == bot_id
             assert (
                 store.db.execute(

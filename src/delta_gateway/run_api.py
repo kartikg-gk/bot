@@ -51,8 +51,8 @@ class RunAPI(ResourceScope):
                 raise web.HTTPNotFound(text="Unknown bot")
         if self.server.needs_model(request):
             raise web.HTTPConflict(text="Choose a model and API key in Account settings")
-        route = self.journal.route(WEB_CHAT, self.server.actor, bot)
-        run, _ = self.journal.queue(route, text, WEB_IDS)
+        route = await self.journal.route(WEB_CHAT, self.server.actor, bot)
+        run, _ = await self.journal.queue(route, text, WEB_IDS)
         await self.service.dispatch()
         if "text/event-stream" in request.headers.get("Accept", ""):
             return await self.follow(request, run, 0)

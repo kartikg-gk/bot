@@ -35,7 +35,7 @@ async def test_only_the_chief_gets_team_tools(tmp_path, store):
 
 async def test_one_task_per_bot_and_restart_interrupts(tmp_path, store):
     bot = await store.create_bot("Researcher", "Finds things")
-    route = store.conversation(1, 1)
+    route = await store.conversation(1, 1)
     store.begin_delegation(route.id, bot, "one")
     with pytest.raises(ValueError, match="busy"):
         store.begin_delegation(route.id, bot, "two")
@@ -52,7 +52,7 @@ async def test_one_task_per_bot_and_restart_interrupts(tmp_path, store):
 
 async def test_team_refuses_the_chief_and_unknown_bots(store):
     team = Team(store, None)
-    route = store.conversation(1, 1)
+    route = await store.conversation(1, 1)
     with pytest.raises(ValueError):
         await team.run("delegate_task", dict(bot_name="Chief of Staff", task="x"), route)
     with pytest.raises(ValueError):
@@ -60,7 +60,7 @@ async def test_team_refuses_the_chief_and_unknown_bots(store):
 
 
 async def run(service, c, identifier, text):
-    service.store.admit([update(identifier, text)], c)
+    await service.store.admit([update(identifier, text)], c)
     await service.dispatch()
     await settle(service)
 
@@ -86,7 +86,7 @@ async def test_two_bots_run_at_the_same_time(tmp_path):
         await service.store.create_bot("One", "a")
         await service.store.create_bot("Two", "b")
         team = service.team
-        route = service.store.conversation(11, 11)
+        route = await service.store.conversation(11, 11)
         answers = await asyncio.wait_for(
             asyncio.gather(
                 team.run("delegate_task", dict(bot_name="One", task="hi"), route),
@@ -104,13 +104,13 @@ async def test_stop_ends_a_delegation_without_replay(tmp_path):
     service = Service(c, Bot(), factory="tests.fake_session:create")
     try:
         await service.store.create_bot("Researcher", "Finds things")
-        service.store.admit([update(1, "delegate:Researcher:slow")], c)
+        await service.store.admit([update(1, "delegate:Researcher:slow")], c)
         await service.dispatch()
         query = "SELECT count(*) FROM delegations WHERE status='running'"
         async with asyncio.timeout(20):
             while not service.store.db.execute(query).fetchone()[0]:
                 await asyncio.sleep(0.02)
-        service.store.admit([update(2, "/stop")], c)
+        await service.store.admit([update(2, "/stop")], c)
         await service.dispatch()
         await settle(service)
         status = service.store.db.execute("SELECT status FROM delegations").fetchone()[0]
@@ -125,7 +125,7 @@ async def test_delegated_bot_asks_the_user_for_approval(tmp_path):
     service = Service(c, telegram, factory="tests.fake_session:create")
     try:
         worker = await service.store.create_bot("Researcher", "Finds things")
-        service.store.admit([update(1, "delegate:Researcher:write")], c)
+        await service.store.admit([update(1, "delegate:Researcher:write")], c)
         await service.dispatch()
         async with asyncio.timeout(30):
             while not service.cards:

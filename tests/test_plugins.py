@@ -57,7 +57,7 @@ async def test_only_granted_bots_can_call_a_plugin(store, monkeypatch):
     monkeypatch.setenv(GITHUB_TOKEN, "secret-token")
     team = Team(store, None, PluginRunner(transport=httpx.MockTransport(github)))
     worker = await store.create_bot("Researcher", "Finds things")
-    route = store.conversation(1, 1)
+    route = await store.conversation(1, 1)
     arguments = dict(repo="a/b")
     with pytest.raises(ValueError, match="not enabled"):
         await team.run("github_list_issues", arguments, route, bot=worker)
@@ -82,7 +82,7 @@ async def test_granted_tools_reach_any_bot_with_write_approval(tmp_path, store):
 
 
 async def command(service, c, identifier, text):
-    service.store.admit([update(identifier, text)], c)
+    await service.store.admit([update(identifier, text)], c)
     await service.dispatch()
     await settle(service)
 

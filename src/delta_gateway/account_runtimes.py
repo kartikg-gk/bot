@@ -61,7 +61,7 @@ class AccountRuntimes:
                     await service.dispatch()
                     service.run_due()
                     await service.cleanup_idle()
-                    service.store.retain()
+                    await service.store.retain()
                 except Exception:
                     logging.getLogger(__name__).exception("Could not advance an account runtime")
             await asyncio.sleep(2)

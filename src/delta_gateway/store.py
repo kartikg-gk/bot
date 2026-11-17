@@ -112,6 +112,38 @@ APPROVALS = (
     "approvals(instance,id,chat,user,run,tool,digest,created,expires,decision,source,thread)"
 )
 
+CONTROL_COMMANDS = (
+    "/bot",
+    "/tasks",
+    "/cancel",
+    "/keep",
+    "/discard",
+    "/memory",
+    "/plugin",
+    "/plugins",
+    "/jobs",
+    "/schedule",
+    "/unschedule",
+    "/pausejob",
+    "/resumejob",
+    "/stop",
+    "/status",
+    "/help",
+    "/start",
+    "/new",
+    "/last",
+    "/sessions",
+    "/switch",
+    "/clone",
+    "/compact",
+    "/export",
+    "/name",
+    "/models",
+    "/model",
+    "/thinking",
+)
+
+
 ENSURE_CHIEF = (
     "INSERT INTO bots(id,instance,name,name_key,role,chief,created) "
     "SELECT ?,?,?,?,?,1,? WHERE NOT EXISTS (SELECT 1 FROM bots WHERE instance=? AND chief=1)"
@@ -336,91 +368,6 @@ class Store:
                 "WHERE instance=? AND id=?",
                 (status, answer, time.time(), self.instance, identifier),
             )
-
-    def take_unreported(self, *, chat=None):
-        with self.db:
-            rows = self.db.execute(
-                f"SELECT {TASK_FIELDS} FROM tasks WHERE instance=? AND status='interrupted' "
-                "AND reported=0 AND (? IS NULL OR chat=?)",
-                (self.instance, chat, chat),
-            ).fetchall()
-            self.db.execute(
-                "UPDATE tasks SET reported=1 WHERE instance=? AND status='interrupted' "
-                "AND (? IS NULL OR chat=?)",
-                (self.instance, chat, chat),
-            )
-        return [Task(*row) for row in rows]
-
-    def add_report(self, task, text):
-        """Queue a prompt for the chat's session, using IDs Telegram updates never reach."""
-        with self.db:
-            newest = self.db.execute(
-                "SELECT max(id) FROM inbox WHERE instance=?", (self.instance,)
-            ).fetchone()[0]
-            identifier = max(newest or 0, 2**60) + 1
-            self.db.execute(
-                f"INSERT INTO {INBOX} VALUES(?,?,?,?,?,'prompt',NULL,?,?,?)",
-                (
-                    self.instance,
-                    identifier,
-                    task.chat,
-                    task.actor,
-                    text,
-                    time.time(),
-                    task.thread,
-                    task.user,
-                ),
-            )
-
-    def admit_web(self, chat, user, text, *, base, route=None, run=None):
-        """Queue a message from the web page, with IDs Telegram updates never reach."""
-        with self.db:
-            self.db.execute("BEGIN IMMEDIATE")
-            newest = self.db.execute(
-                "SELECT max(id) FROM inbox WHERE instance=? AND id>=? AND id<?",
-                (self.instance, base, 2**60),
-            ).fetchone()[0]
-            identifier = max(newest or 0, base) + 1
-            route = route or self.conversation(chat, user)
-            self.db.execute(
-                f"INSERT INTO {INBOX} VALUES(?,?,?,?,?,?,?,?,?,?)",
-                (
-                    self.instance,
-                    identifier,
-                    chat,
-                    user,
-                    text,
-                    "prompt" if run else "pending",
-                    run,
-                    time.time(),
-                    route.thread,
-                    user,
-                ),
-            )
-            if run:
-                self.db.execute(
-                    "INSERT INTO web_runs(instance,id,inbox,bot,actor) VALUES(?,?,?,?,?)",
-                    (self.instance, run, identifier, route.bot, user),
-                )
-                self.db.execute(
-                    "INSERT INTO web_run_events VALUES(?,?,1,'run_queued',?)",
-                    (self.instance, run, json.dumps({"bot": route.bot})),
-                )
-            self.db.execute(
-                "INSERT INTO messages(instance,route,direction,text,platform_id,created) "
-                "VALUES(?,?,'inbound',?,?,?)",
-                (self.instance, route.id, text, f"web-{identifier}", time.time()),
-            )
-        return identifier
-
-    def history(self, chat, user, limit=100):
-        route = self.conversation(chat, user, 0)
-        rows = self.db.execute(
-            "SELECT direction,text,created FROM messages WHERE instance=? AND route=? "
-            "AND text IS NOT NULL ORDER BY id DESC LIMIT ?",
-            (self.instance, route.id, limit),
-        ).fetchall()
-        return [dict(direction=d, text=t, created=c) for d, t, c in reversed(rows)]
 
     def plugins_for(self, bot):
         return [
@@ -651,264 +598,13 @@ class Store:
                 (status, answer, time.time(), self.instance, identifier),
             )
 
-    def switch_bot(self, route, bot):
-        """Keep each bot's session on this route so switching back resumes it."""
-        fields = "session,session_file,title,provider,model,thinking"
-        route = self.get_route(route.id)
-        with self.db:
-            self.db.execute(
-                f"INSERT OR REPLACE INTO route_bots(route,bot,{fields}) VALUES(?,?,?,?,?,?,?,?)",
-                (
-                    route.id,
-                    route.bot,
-                    route.session,
-                    route.session_file,
-                    route.title,
-                    route.provider,
-                    route.model,
-                    route.thinking,
-                ),
-            )
-            saved = (
-                self.db.execute(
-                    f"SELECT {fields} FROM route_bots WHERE route=? AND bot=?", (route.id, bot.id)
-                ).fetchone()
-                or (None,) * 6
-            )
-            self.db.execute(
-                "UPDATE routes SET bot=?,session=?,session_file=?,title=?,provider=?,model=?,"
-                "thinking=?,updated=? WHERE instance=? AND id=?",
-                (bot.id, *saved, time.time(), self.instance, route.id),
-            )
-        return self.get_route(route.id)
-
-    def bind_bot(self, bot_id):
-        old = self.db.execute(
-            "SELECT bot_id FROM instances WHERE id=?", (self.instance,)
-        ).fetchone()[0]
-        if old is not None and old != bot_id:
-            raise ValueError("Bot identity differs from configured instance")
-        with self.db:
-            self.db.execute("UPDATE instances SET bot_id=? WHERE id=?", (bot_id, self.instance))
-
-    @property
-    def offset(self):
-        row = self.db.execute(
-            "SELECT offset FROM poll_state WHERE instance=?", (self.instance,)
-        ).fetchone()
-        return row[0] if row else 0
-
-    def admit(self, updates, config, bot_id=None, username=""):
-        with self.db:
-            for update in updates:
-                route = admit_message(update.get("message", {}), config, bot_id, username)
-                if route:
-                    chat, user, thread, text = route
-                    route_user = config.route(chat, user, thread)[1]
-                    count = self.db.execute(
-                        "SELECT count(*) FROM inbox WHERE instance=? AND chat=? "
-                        "AND route_user=? AND thread=? AND status IN ('pending','prompt')",
-                        (self.instance, chat, route_user, thread),
-                    ).fetchone()[0]
-                    control = (text.split(maxsplit=1) or [""])[0].split("@")[0] in (
-                        "/bot",
-                        "/tasks",
-                        "/cancel",
-                        "/keep",
-                        "/discard",
-                        "/memory",
-                        "/plugin",
-                        "/plugins",
-                        "/jobs",
-                        "/schedule",
-                        "/unschedule",
-                        "/pausejob",
-                        "/resumejob",
-                        "/stop",
-                        "/status",
-                        "/help",
-                        "/start",
-                        "/new",
-                        "/last",
-                        "/sessions",
-                        "/switch",
-                        "/clone",
-                        "/compact",
-                        "/export",
-                        "/name",
-                        "/models",
-                        "/model",
-                        "/thinking",
-                    )
-                    status = (
-                        "pending"
-                        if config.backlog is None or count < config.backlog or control
-                        else "rejected"
-                    )
-                    inserted = self.db.execute(
-                        f"INSERT OR IGNORE INTO {INBOX} VALUES(?,?,?,?,?,?,NULL,?,?,?)",
-                        (
-                            self.instance,
-                            update["update_id"],
-                            chat,
-                            user,
-                            text,
-                            status,
-                            time.time(),
-                            thread,
-                            route_user,
-                        ),
-                    ).rowcount
-                    if inserted:
-                        conversation = self.conversation(chat, route_user, thread)
-                        self.db.execute(
-                            (
-                                "INSERT OR IGNORE INTO messages(instance,route,direction,text,platf"
-                                "orm_id,created) VALUES(?,?,'inbound',?,?,?)"
-                            ),
-                            (
-                                self.instance,
-                                conversation.id,
-                                text,
-                                str(update["update_id"]),
-                                time.time(),
-                            ),
-                        )
-                self.db.execute(
-                    "INSERT INTO poll_state VALUES(?,?) ON CONFLICT(instance) "
-                    "DO UPDATE SET offset=max(offset,excluded.offset)",
-                    (self.instance, update["update_id"] + 1),
-                )
-            total = self.db.execute(
-                "SELECT count(*) FROM inbox WHERE instance=? "
-                "AND status IN ('pending','prompt','rejected')",
-                (self.instance,),
-            ).fetchone()[0]
-            if config.backlog is not None and total > 1000:
-                raise RuntimeError(
-                    "Inbox capacity reached; resolve pending items before restarting"
-                )
-
-    def pending(self):
-        return self.db.execute(
-            "SELECT id,chat,user,text,status,thread FROM inbox WHERE instance=? "
-            "AND status IN ('pending','prompt','rejected') ORDER BY id",
-            (self.instance,),
-        ).fetchall()
-
-    def mark(self, update, status, run=None):
-        with self.db:
-            self.db.execute(
-                "UPDATE inbox SET status=?,run=coalesce(?,run) WHERE instance=? AND id=?",
-                (status, run, self.instance, update),
-            )
-
-    def is_pending(self, update):
-        return (
-            self.db.execute(
-                "SELECT 1 FROM inbox WHERE instance=? AND id=? "
-                "AND status IN ('pending','prompt','rejected')",
-                (self.instance, update),
-            ).fetchone()
-            is not None
-        )
-
-    def mapping(self, chat, user, thread=0):
-        return self.db.execute(
-            "SELECT session,persisted FROM conversations WHERE instance=? "
-            "AND chat=? AND user=? AND thread=?",
-            (self.instance, chat, user, thread),
-        ).fetchone()
-
-    def map(self, chat, user, thread, session, persisted=False):
-        with self.db:
-            if session:
-                owner = self.db.execute(
-                    "SELECT chat,user,thread FROM session_owners WHERE instance=? AND session=?",
-                    (self.instance, session),
-                ).fetchone()
-                if owner and owner != (chat, user, thread):
-                    raise ValueError("Session belongs to another conversation")
-                self.db.execute(
-                    "INSERT OR IGNORE INTO session_owners"
-                    "(instance,session,chat,user,created,updated,thread) "
-                    "VALUES(?,?,?,?,?,?,?)",
-                    (self.instance, session, chat, user, time.time(), time.time(), thread),
-                )
-            self.db.execute(
-                "INSERT INTO conversations VALUES(?,?,?,?,?,?) "
-                "ON CONFLICT(instance,chat,user,thread) "
-                "DO UPDATE SET session=excluded.session,persisted=excluded.persisted",
-                (self.instance, chat, user, session, int(persisted), thread),
-            )
-
-    def clear_queue(self, chat, user, thread=0):
-        with self.db:
-            self.db.execute(
-                "UPDATE inbox SET status='cancelled' WHERE instance=? "
-                "AND chat=? AND user=? AND thread=? "
-                "AND status IN ('pending','prompt','scheduled') AND (text NOT LIKE '/%' "
-                "OR status IN ('prompt','scheduled') OR text LIKE '/queue %' "
-                "OR text LIKE '/steer %' OR text LIKE '/delta %')",
-                (self.instance, chat, user, thread),
-            )
-
-    def audit(self, event, chat, user, thread=0):
-        with self.db:
-            self.db.execute(
-                f"INSERT INTO {APPROVALS} VALUES(?,?,?,?,?,?,?,?,?,NULL,NULL,?)",
-                (
-                    self.instance,
-                    event["approval_id"],
-                    chat,
-                    user,
-                    event["run_id"],
-                    event["tool"],
-                    event["digest"],
-                    time.time(),
-                    event["expires_at"],
-                    thread,
-                ),
-            )
-
-    def decide(self, approval, allow, source):
-        with self.db:
-            self.db.execute(
-                "UPDATE approvals SET decision=?,source=? WHERE instance=? AND id=? "
-                "AND decision IS NULL",
-                ("allowed" if allow else "denied", source, self.instance, approval),
-            )
-
-    def retain(self, days=None):
-        days = days or self.retention_days
-        if days is None:
-            return
-        with self.db:
-            self.db.execute(
-                "UPDATE inbox SET text=NULL WHERE instance=? AND created<? "
-                "AND status IN ('completed','cancelled','dismissed','rejected_done')",
-                (self.instance, time.time() - days * 86400),
-            )
-            self.db.execute(
-                ("DELETE FROM approvals WHERE instance=? AND created<? AND decision IS NOT NULL"),
-                (self.instance, time.time() - 30 * 86400),
-            )
-            self.db.execute(
-                "DELETE FROM web_runs WHERE instance=? AND finished<?",
-                (self.instance, time.time() - days * 86400),
-            )
-            self.db.execute(
-                "DELETE FROM messages WHERE instance=? AND created<?",
-                (self.instance, time.time() - days * 86400),
-            )
-
     def seed_routes(self, session_directory):
         with self.db:
             for chat, user, thread, session in self.db.execute(
                 "SELECT chat,user,thread,session FROM conversations WHERE instance=?",
                 (self.instance,),
             ).fetchall():
-                saved = self.saved(session) if session else {}
+                saved = self._saved_now(session) if session else {}
                 self.db.execute(
                     (
                         "INSERT OR IGNORE INTO routes(instance,chat,user,thread,session,ses"
@@ -930,188 +626,6 @@ class Store:
                         time.time(),
                     ),
                 )
-
-    def conversation(self, chat, user, thread=0):
-        if not self.db.in_transaction:
-            with self.db:
-                return self._conversation(chat, user, thread)
-        return self._conversation(chat, user, thread)
-
-    def _conversation(self, chat, user, thread):
-        self.db.execute(
-            (
-                "INSERT OR IGNORE INTO routes(instance,chat,user,thread,created,upd"
-                "ated) VALUES(?,?,?,?,?,?)"
-            ),
-            (self.instance, chat, user, thread, time.time(), time.time()),
-        )
-        self.db.execute(
-            "UPDATE routes SET bot=(SELECT id FROM bots WHERE instance=? AND chief=1) "
-            "WHERE instance=? AND chat=? AND user=? AND thread=? AND bot IS NULL",
-            (self.instance, self.instance, chat, user, thread),
-        )
-        row = self.db.execute(
-            "SELECT * FROM routes WHERE instance=? AND chat=? AND user=? AND thread=?",
-            (self.instance, chat, user, thread),
-        ).fetchone()
-        return Conversation(*row)
-
-    def get_route(self, identifier):
-        row = self.db.execute(
-            "SELECT * FROM routes WHERE instance=? AND id=?", (self.instance, identifier)
-        ).fetchone()
-        return Conversation(*row) if row else None
-
-    def list_routes(self, actor, *, groups=True):
-        return [
-            Conversation(*row)
-            for row in self.db.execute(
-                (
-                    "SELECT * FROM routes WHERE instance=? AND (user=? OR (? AND user=0"
-                    ")) ORDER BY updated DESC,id DESC LIMIT 10"
-                ),
-                (self.instance, actor, int(groups)),
-            )
-        ]
-
-    def persist_route(self, route, state):
-        model = state.get("model") or {}
-        with self.db:
-            if state.get("sessionFile"):
-                self.db.execute(
-                    (
-                        "UPDATE routes SET title=?,provider=?,model=?,thinking=? WHERE inst"
-                        "ance=? AND session_file=?"
-                    ),
-                    (
-                        state.get("sessionName"),
-                        model.get("provider"),
-                        model.get("id"),
-                        state.get("thinkingLevel"),
-                        self.instance,
-                        state["sessionFile"],
-                    ),
-                )
-            self.db.execute(
-                (
-                    "UPDATE routes SET session=?,session_file=?,title=?,provider=?,mode"
-                    "l=?,thinking=?,updated=? WHERE instance=? AND id=?"
-                ),
-                (
-                    state.get("sessionId"),
-                    state.get("sessionFile"),
-                    state.get("sessionName"),
-                    model.get("provider"),
-                    model.get("id"),
-                    state.get("thinkingLevel"),
-                    time.time(),
-                    self.instance,
-                    route.id,
-                ),
-            )
-            self.db.execute(
-                (
-                    "INSERT INTO conversations VALUES(?,?,?,?,?,?) ON CONFLICT(instance"
-                    ",chat,user,thread) DO UPDATE SET session=excluded.session,persiste"
-                    "d=excluded.persisted"
-                ),
-                (
-                    self.instance,
-                    route.chat,
-                    route.user,
-                    state.get("sessionId"),
-                    int(bool(state.get("sessionFile") and Path(state["sessionFile"]).is_file())),
-                    route.thread,
-                ),
-            )
-            if state.get("sessionId"):
-                self.db.execute(
-                    (
-                        "INSERT OR IGNORE INTO session_owners(instance,session,chat,user,th"
-                        "read,created,updated) VALUES(?,?,?,?,?,?,?)"
-                    ),
-                    (
-                        self.instance,
-                        state["sessionId"],
-                        route.chat,
-                        route.user,
-                        route.thread,
-                        time.time(),
-                        time.time(),
-                    ),
-                )
-                self.remember(
-                    route.chat,
-                    route.user,
-                    route.thread,
-                    dict(
-                        session_id=state["sessionId"],
-                        title=state.get("sessionName"),
-                        provider=model.get("provider"),
-                        model=model.get("id"),
-                        thinking=state.get("thinkingLevel"),
-                    ),
-                ) if self.owns(route.chat, route.user, route.thread, state["sessionId"]) else None
-        for name in ("session", "session_file", "title", "provider", "model", "thinking"):
-            setattr(route, name, getattr(self.get_route(route.id), name))
-
-    def point(self, route, source):
-        with self.db:
-            self.db.execute(
-                (
-                    "UPDATE routes SET session=?,session_file=?,title=?,provider=?,mode"
-                    "l=?,thinking=?,bot=?,updated=? WHERE instance=? AND id=?"
-                ),
-                (
-                    source.session,
-                    source.session_file,
-                    source.title,
-                    source.provider,
-                    source.model,
-                    source.thinking,
-                    source.bot,
-                    time.time(),
-                    self.instance,
-                    route.id,
-                ),
-            )
-        return self.get_route(route.id)
-
-    def items(self):
-        return [
-            InboxItem(*row)
-            for row in self.db.execute(
-                (
-                    "SELECT id,chat,user,text,status,thread,coalesce(route_user,user),run F"
-                    "ROM inbox WHERE instance=? AND status IN ('pending','prompt','reje"
-                    "cted') ORDER BY id"
-                ),
-                (self.instance,),
-            )
-        ]
-
-    def clear_route_queue(self, key):
-        with self.db:
-            self.db.execute(
-                (
-                    "UPDATE inbox SET status='cancelled' WHERE instance=? AND chat=? AN"
-                    "D route_user=? AND thread=? AND status IN ('pending','prompt','sch"
-                    "eduled') AND (text NOT LIKE '/%' OR text LIKE '/delta %' OR text L"
-                    "IKE '/queue %' OR text LIKE '/steer %' OR status IN ('prompt','sch"
-                    "eduled'))"
-                ),
-                (self.instance, *key),
-            )
-
-    def log_message(self, route, text):
-        with self.db:
-            self.db.execute(
-                (
-                    "INSERT INTO messages(instance,route,direction,text,created) VALUES"
-                    "(?,?,'outbound',?,?)"
-                ),
-                (self.instance, route.id, text, time.time()),
-            )
 
     def archive(self):
         with self.db:
@@ -1135,44 +649,26 @@ class Store:
             self.shared.close_now()
         self.db.close()
 
-    def owns(self, chat, user, thread, session):
-        return (
-            self.db.execute(
-                "SELECT 1 FROM session_owners WHERE instance=? AND session=? "
-                "AND chat=? AND user=? AND thread=?",
-                (self.instance, session, chat, user, thread),
-            ).fetchone()
-            is not None
+    def conversation_now(self, chat, user, thread=0):
+        """conversation() for offline operator steps that already hold a write transaction."""
+        self.db.execute(
+            "INSERT OR IGNORE INTO routes(instance,chat,user,thread,created,updated) "
+            "VALUES(?,?,?,?,?,?)",
+            (self.instance, chat, user, thread, time.time(), time.time()),
         )
+        self.db.execute(
+            "UPDATE routes SET bot=(SELECT id FROM bots WHERE instance=? AND chief=1) "
+            "WHERE instance=? AND chat=? AND user=? AND thread=? AND bot IS NULL",
+            (self.instance, self.instance, chat, user, thread),
+        )
+        row = self.db.execute(
+            "SELECT * FROM routes WHERE instance=? AND chat=? AND user=? AND thread=?",
+            (self.instance, chat, user, thread),
+        ).fetchone()
+        return Conversation(*row)
 
-    def remember(self, chat, user, thread, details):
-        session = details["session_id"]
-        if not self.owns(chat, user, thread, session):
-            raise ValueError("Unknown session owner")
-        with self.db:
-            self.db.execute(
-                "UPDATE session_owners SET title=?,provider=?,model=?,thinking=?,updated=? "
-                "WHERE instance=? AND session=? AND chat=? AND user=? AND thread=?",
-                (
-                    details.get("title"),
-                    details.get("provider"),
-                    details.get("model"),
-                    details.get("thinking"),
-                    time.time(),
-                    self.instance,
-                    session,
-                    chat,
-                    user,
-                    thread,
-                ),
-            )
-            self.db.execute(
-                "INSERT INTO session_status VALUES(?,?,?) ON CONFLICT(instance,session) "
-                "DO UPDATE SET data=excluded.data",
-                (self.instance, session, json.dumps(details)),
-            )
-
-    def saved(self, session):
+    def _saved_now(self, session):
+        """Startup copy of saved(), used before the event loop runs."""
         self.db.row_factory = sqlite3.Row
         try:
             row = self.db.execute(
@@ -1191,27 +687,526 @@ class Store:
         finally:
             self.db.row_factory = None
 
-    def sessions(self, chat, user, thread=0, offset=0):
-        return self.db.execute(
+    async def take_unreported(self, *, chat=None):
+        # One statement claims the rows, so two callers never report the same task twice.
+        rows = await self.shared.query(
+            "UPDATE tasks SET reported=1 WHERE instance=? AND status='interrupted' "
+            f"AND reported=0 AND (? IS NULL OR chat=?) RETURNING {TASK_FIELDS}",
+            (self.instance, chat, chat),
+        )
+        return sorted((Task(*row.values()) for row in rows), key=lambda task: task.id)
+
+    async def add_report(self, task, text):
+        """Queue a prompt for the chat's session, using IDs Telegram updates never reach."""
+        await self.shared.run(
+            f"INSERT INTO {INBOX} SELECT ?,max(coalesce((SELECT max(id) FROM inbox "
+            "WHERE instance=?),0),CAST(? AS INTEGER))+1,?,?,?,'prompt',NULL,?,?,?",
             (
-                "SELECT session,title,provider,model FROM session_owners WHERE inst"
-                "ance=? AND chat=? AND user=? AND thread=? ORDER BY updated DESC,se"
-                "ssion LIMIT 21 OFFSET ?"
+                self.instance,
+                self.instance,
+                2**60,
+                task.chat,
+                task.actor,
+                text,
+                time.time(),
+                task.thread,
+                task.user,
             ),
+        )
+
+    async def admit_web(self, chat, user, text, *, base, route=None, run=None):
+        """Queue a message from the web page, with IDs Telegram updates never reach."""
+        route = route or await self.conversation(chat, user)
+        # The next ID is taken in the same statement that inserts it, so two writers
+        # cannot pick the same one.
+        rows = await self.shared.query(
+            f"INSERT INTO {INBOX} SELECT ?,max(coalesce((SELECT max(id) FROM inbox "
+            "WHERE instance=? AND id>=CAST(? AS INTEGER) AND id<CAST(? AS INTEGER)),0),"
+            "CAST(? AS INTEGER))+1,?,?,?,?,?,?,?,? RETURNING id",
+            (
+                self.instance,
+                self.instance,
+                base,
+                2**60,
+                base,
+                chat,
+                user,
+                text,
+                "prompt" if run else "pending",
+                run,
+                time.time(),
+                route.thread,
+                user,
+            ),
+        )
+        identifier = rows[0]["id"]
+        if run:
+            await self.shared.run(
+                "INSERT INTO web_runs(instance,id,inbox,bot,actor) VALUES(?,?,?,?,?)",
+                (self.instance, run, identifier, route.bot, user),
+            )
+            await self.shared.run(
+                "INSERT INTO web_run_events VALUES(?,?,1,'run_queued',?)",
+                (self.instance, run, json.dumps({"bot": route.bot})),
+            )
+        await self.shared.run(
+            "INSERT INTO messages(instance,route,direction,text,platform_id,created) "
+            "VALUES(?,?,'inbound',?,?,?)",
+            (self.instance, route.id, text, f"web-{identifier}", time.time()),
+        )
+        return identifier
+
+    async def history(self, chat, user, limit=100):
+        route = await self.conversation(chat, user, 0)
+        rows = await self.shared.query(
+            "SELECT direction,text,created FROM messages WHERE instance=? AND route=? "
+            "AND text IS NOT NULL ORDER BY id DESC LIMIT ?",
+            (self.instance, route.id, limit),
+        )
+        return [dict(row) for row in reversed(rows)]
+
+    async def switch_bot(self, route, bot):
+        """Keep each bot's session on this route so switching back resumes it."""
+        fields = "session,session_file,title,provider,model,thinking"
+        route = await self.get_route(route.id)
+        await self.shared.run(
+            f"INSERT OR REPLACE INTO route_bots(route,bot,{fields}) VALUES(?,?,?,?,?,?,?,?)",
+            (
+                route.id,
+                route.bot,
+                route.session,
+                route.session_file,
+                route.title,
+                route.provider,
+                route.model,
+                route.thinking,
+            ),
+        )
+        rows = await self.shared.query(
+            f"SELECT {fields} FROM route_bots WHERE route=? AND bot=?", (route.id, bot.id)
+        )
+        saved = tuple(rows[0].values()) if rows else (None,) * 6
+        await self.shared.run(
+            "UPDATE routes SET bot=?,session=?,session_file=?,title=?,provider=?,model=?,"
+            "thinking=?,updated=? WHERE instance=? AND id=?",
+            (bot.id, *saved, time.time(), self.instance, route.id),
+        )
+        return await self.get_route(route.id)
+
+    async def bind_bot(self, bot_id):
+        rows = await self.shared.query("SELECT bot_id FROM instances WHERE id=?", (self.instance,))
+        old = rows[0]["bot_id"]
+        if old is not None and old != bot_id:
+            raise ValueError("Bot identity differs from configured instance")
+        await self.shared.run("UPDATE instances SET bot_id=? WHERE id=?", (bot_id, self.instance))
+
+    async def offset(self):
+        rows = await self.shared.query(
+            "SELECT offset FROM poll_state WHERE instance=?", (self.instance,)
+        )
+        return rows[0]["offset"] if rows else 0
+
+    async def admit(self, updates, config, bot_id=None, username=""):
+        routed = []
+        for update in updates:
+            route = admit_message(update.get("message", {}), config, bot_id, username)
+            routed.append((update, route))
+        # Check capacity before writing anything, as the old all-or-nothing batch did.
+        if config.backlog is not None and routed:
+            total = (
+                await self.shared.query(
+                    "SELECT count(*) AS n FROM inbox WHERE instance=? "
+                    "AND status IN ('pending','prompt','rejected')",
+                    (self.instance,),
+                )
+            )[0]["n"]
+            fresh = [update["update_id"] for update, route in routed if route]
+            known = set()
+            if fresh:
+                marks = ",".join("?" * len(fresh))
+                known = {
+                    row["id"]
+                    for row in await self.shared.query(
+                        f"SELECT id FROM inbox WHERE instance=? AND id IN ({marks})",
+                        (self.instance, *fresh),
+                    )
+                }
+            if total + len(set(fresh) - known) > 1000:
+                raise RuntimeError(
+                    "Inbox capacity reached; resolve pending items before restarting"
+                )
+        for update, route in routed:
+            if route:
+                chat, user, thread, text = route
+                route_user = config.route(chat, user, thread)[1]
+                count = (
+                    await self.shared.query(
+                        "SELECT count(*) AS n FROM inbox WHERE instance=? AND chat=? "
+                        "AND route_user=? AND thread=? AND status IN ('pending','prompt')",
+                        (self.instance, chat, route_user, thread),
+                    )
+                )[0]["n"]
+                control = (text.split(maxsplit=1) or [""])[0].split("@")[0] in CONTROL_COMMANDS
+                status = (
+                    "pending"
+                    if config.backlog is None or count < config.backlog or control
+                    else "rejected"
+                )
+                inserted = await self.shared.run(
+                    f"INSERT OR IGNORE INTO {INBOX} VALUES(?,?,?,?,?,?,NULL,?,?,?)",
+                    (
+                        self.instance,
+                        update["update_id"],
+                        chat,
+                        user,
+                        text,
+                        status,
+                        time.time(),
+                        thread,
+                        route_user,
+                    ),
+                )
+                if inserted:
+                    conversation = await self.conversation(chat, route_user, thread)
+                    await self.shared.run(
+                        "INSERT OR IGNORE INTO messages(instance,route,direction,text,platf"
+                        "orm_id,created) VALUES(?,?,'inbound',?,?,?)",
+                        (
+                            self.instance,
+                            conversation.id,
+                            text,
+                            str(update["update_id"]),
+                            time.time(),
+                        ),
+                    )
+            await self.shared.run(
+                "INSERT INTO poll_state VALUES(?,?) ON CONFLICT(instance) "
+                "DO UPDATE SET offset=max(offset,excluded.offset)",
+                (self.instance, update["update_id"] + 1),
+            )
+
+    async def pending(self):
+        rows = await self.shared.query(
+            "SELECT id,chat,user,text,status,thread FROM inbox WHERE instance=? "
+            "AND status IN ('pending','prompt','rejected') ORDER BY id",
+            (self.instance,),
+        )
+        return [tuple(row.values()) for row in rows]
+
+    async def mark(self, update, status, run=None):
+        await self.shared.run(
+            "UPDATE inbox SET status=?,run=coalesce(?,run),version=version+1 "
+            "WHERE instance=? AND id=?",
+            (status, run, self.instance, update),
+        )
+
+    async def is_pending(self, update):
+        rows = await self.shared.query(
+            "SELECT 1 FROM inbox WHERE instance=? AND id=? "
+            "AND status IN ('pending','prompt','rejected')",
+            (self.instance, update),
+        )
+        return bool(rows)
+
+    async def mapping(self, chat, user, thread=0):
+        rows = await self.shared.query(
+            "SELECT session,persisted FROM conversations WHERE instance=? "
+            "AND chat=? AND user=? AND thread=?",
+            (self.instance, chat, user, thread),
+        )
+        return tuple(rows[0].values()) if rows else None
+
+    async def map(self, chat, user, thread, session, persisted=False):
+        if session:
+            rows = await self.shared.query(
+                "SELECT chat,user,thread FROM session_owners WHERE instance=? AND session=?",
+                (self.instance, session),
+            )
+            if rows and tuple(rows[0].values()) != (chat, user, thread):
+                raise ValueError("Session belongs to another conversation")
+            await self.shared.run(
+                "INSERT OR IGNORE INTO session_owners"
+                "(instance,session,chat,user,created,updated,thread) "
+                "VALUES(?,?,?,?,?,?,?)",
+                (self.instance, session, chat, user, time.time(), time.time(), thread),
+            )
+        await self.shared.run(
+            "INSERT INTO conversations VALUES(?,?,?,?,?,?) "
+            "ON CONFLICT(instance,chat,user,thread) "
+            "DO UPDATE SET session=excluded.session,persisted=excluded.persisted",
+            (self.instance, chat, user, session, int(persisted), thread),
+        )
+
+    async def clear_queue(self, chat, user, thread=0):
+        await self.shared.run(
+            "UPDATE inbox SET status='cancelled',version=version+1 WHERE instance=? "
+            "AND chat=? AND user=? AND thread=? "
+            "AND status IN ('pending','prompt','scheduled') AND (text NOT LIKE '/%' "
+            "OR status IN ('prompt','scheduled') OR text LIKE '/queue %' "
+            "OR text LIKE '/steer %' OR text LIKE '/delta %')",
+            (self.instance, chat, user, thread),
+        )
+
+    async def audit(self, event, chat, user, thread=0):
+        await self.shared.run(
+            f"INSERT INTO {APPROVALS} VALUES(?,?,?,?,?,?,?,?,?,NULL,NULL,?)",
+            (
+                self.instance,
+                event["approval_id"],
+                chat,
+                user,
+                event["run_id"],
+                event["tool"],
+                event["digest"],
+                time.time(),
+                event["expires_at"],
+                thread,
+            ),
+        )
+
+    async def decide(self, approval, allow, source):
+        await self.shared.run(
+            "UPDATE approvals SET decision=?,source=?,version=version+1 WHERE instance=? "
+            "AND id=? AND decision IS NULL",
+            ("allowed" if allow else "denied", source, self.instance, approval),
+        )
+
+    async def retain(self, days=None):
+        days = days or self.retention_days
+        if days is None:
+            return
+        cutoff = time.time() - days * 86400
+        await self.shared.run(
+            "UPDATE inbox SET text=NULL WHERE instance=? AND created<? "
+            "AND status IN ('completed','cancelled','dismissed','rejected_done')",
+            (self.instance, cutoff),
+        )
+        await self.shared.run(
+            "DELETE FROM approvals WHERE instance=? AND created<? AND decision IS NOT NULL",
+            (self.instance, time.time() - 30 * 86400),
+        )
+        await self.shared.run(
+            "DELETE FROM web_runs WHERE instance=? AND finished<?", (self.instance, cutoff)
+        )
+        await self.shared.run(
+            "DELETE FROM messages WHERE instance=? AND created<?", (self.instance, cutoff)
+        )
+
+    async def conversation(self, chat, user, thread=0):
+        # Each step is safe to repeat, so no transaction is needed around them.
+        await self.shared.run(
+            "INSERT OR IGNORE INTO routes(instance,chat,user,thread,created,updated) "
+            "VALUES(?,?,?,?,?,?)",
+            (self.instance, chat, user, thread, time.time(), time.time()),
+        )
+        await self.shared.run(
+            "UPDATE routes SET bot=(SELECT id FROM bots WHERE instance=? AND chief=1) "
+            "WHERE instance=? AND chat=? AND user=? AND thread=? AND bot IS NULL",
+            (self.instance, self.instance, chat, user, thread),
+        )
+        rows = await self.shared.query(
+            "SELECT * FROM routes WHERE instance=? AND chat=? AND user=? AND thread=?",
+            (self.instance, chat, user, thread),
+        )
+        return Conversation(*rows[0].values())
+
+    async def get_route(self, identifier):
+        rows = await self.shared.query(
+            "SELECT * FROM routes WHERE instance=? AND id=?", (self.instance, identifier)
+        )
+        return Conversation(*rows[0].values()) if rows else None
+
+    async def list_routes(self, actor, *, groups=True):
+        rows = await self.shared.query(
+            "SELECT * FROM routes WHERE instance=? AND (user=? OR (? AND user=0)) "
+            "ORDER BY updated DESC,id DESC LIMIT 10",
+            (self.instance, actor, int(groups)),
+        )
+        return [Conversation(*row.values()) for row in rows]
+
+    async def persist_route(self, route, state):
+        model = state.get("model") or {}
+        if state.get("sessionFile"):
+            await self.shared.run(
+                "UPDATE routes SET title=?,provider=?,model=?,thinking=? WHERE instance=? "
+                "AND session_file=?",
+                (
+                    state.get("sessionName"),
+                    model.get("provider"),
+                    model.get("id"),
+                    state.get("thinkingLevel"),
+                    self.instance,
+                    state["sessionFile"],
+                ),
+            )
+        await self.shared.run(
+            "UPDATE routes SET session=?,session_file=?,title=?,provider=?,model=?,thinking=?,"
+            "updated=? WHERE instance=? AND id=?",
+            (
+                state.get("sessionId"),
+                state.get("sessionFile"),
+                state.get("sessionName"),
+                model.get("provider"),
+                model.get("id"),
+                state.get("thinkingLevel"),
+                time.time(),
+                self.instance,
+                route.id,
+            ),
+        )
+        await self.shared.run(
+            "INSERT INTO conversations VALUES(?,?,?,?,?,?) ON CONFLICT(instance,chat,user,"
+            "thread) DO UPDATE SET session=excluded.session,persisted=excluded.persisted",
+            (
+                self.instance,
+                route.chat,
+                route.user,
+                state.get("sessionId"),
+                int(bool(state.get("sessionFile") and Path(state["sessionFile"]).is_file())),
+                route.thread,
+            ),
+        )
+        if state.get("sessionId"):
+            await self.shared.run(
+                "INSERT OR IGNORE INTO session_owners(instance,session,chat,user,thread,"
+                "created,updated) VALUES(?,?,?,?,?,?,?)",
+                (
+                    self.instance,
+                    state["sessionId"],
+                    route.chat,
+                    route.user,
+                    route.thread,
+                    time.time(),
+                    time.time(),
+                ),
+            )
+            if await self.owns(route.chat, route.user, route.thread, state["sessionId"]):
+                await self.remember(
+                    route.chat,
+                    route.user,
+                    route.thread,
+                    dict(
+                        session_id=state["sessionId"],
+                        title=state.get("sessionName"),
+                        provider=model.get("provider"),
+                        model=model.get("id"),
+                        thinking=state.get("thinkingLevel"),
+                    ),
+                )
+        current = await self.get_route(route.id)
+        for name in ("session", "session_file", "title", "provider", "model", "thinking"):
+            setattr(route, name, getattr(current, name))
+
+    async def point(self, route, source):
+        await self.shared.run(
+            "UPDATE routes SET session=?,session_file=?,title=?,provider=?,model=?,thinking=?,"
+            "bot=?,updated=? WHERE instance=? AND id=?",
+            (
+                source.session,
+                source.session_file,
+                source.title,
+                source.provider,
+                source.model,
+                source.thinking,
+                source.bot,
+                time.time(),
+                self.instance,
+                route.id,
+            ),
+        )
+        return await self.get_route(route.id)
+
+    async def items(self):
+        rows = await self.shared.query(
+            "SELECT id,chat,user,text,status,thread,coalesce(route_user,user),run FROM inbox "
+            "WHERE instance=? AND status IN ('pending','prompt','rejected') ORDER BY id",
+            (self.instance,),
+        )
+        return [InboxItem(*row.values()) for row in rows]
+
+    async def clear_route_queue(self, key):
+        await self.shared.run(
+            "UPDATE inbox SET status='cancelled',version=version+1 WHERE instance=? AND chat=? "
+            "AND route_user=? AND thread=? AND status IN ('pending','prompt','scheduled') AND "
+            "(text NOT LIKE '/%' OR text LIKE '/delta %' OR text LIKE '/queue %' OR text "
+            "LIKE '/steer %' OR status IN ('prompt','scheduled'))",
+            (self.instance, *key),
+        )
+
+    async def log_message(self, route, text):
+        await self.shared.run(
+            "INSERT INTO messages(instance,route,direction,text,created) VALUES"
+            "(?,?,'outbound',?,?)",
+            (self.instance, route.id, text, time.time()),
+        )
+
+    async def owns(self, chat, user, thread, session):
+        rows = await self.shared.query(
+            "SELECT 1 FROM session_owners WHERE instance=? AND session=? "
+            "AND chat=? AND user=? AND thread=?",
+            (self.instance, session, chat, user, thread),
+        )
+        return bool(rows)
+
+    async def remember(self, chat, user, thread, details):
+        session = details["session_id"]
+        if not await self.owns(chat, user, thread, session):
+            raise ValueError("Unknown session owner")
+        await self.shared.run(
+            "UPDATE session_owners SET title=?,provider=?,model=?,thinking=?,updated=? "
+            "WHERE instance=? AND session=? AND chat=? AND user=? AND thread=?",
+            (
+                details.get("title"),
+                details.get("provider"),
+                details.get("model"),
+                details.get("thinking"),
+                time.time(),
+                self.instance,
+                session,
+                chat,
+                user,
+                thread,
+            ),
+        )
+        await self.shared.run(
+            "INSERT INTO session_status VALUES(?,?,?) ON CONFLICT(instance,session) "
+            "DO UPDATE SET data=excluded.data",
+            (self.instance, session, json.dumps(details)),
+        )
+
+    async def saved(self, session):
+        rows = await self.shared.query(
+            "SELECT * FROM session_owners WHERE instance=? AND session=?",
+            (self.instance, session),
+        )
+        if not rows:
+            return {}
+        result = dict(rows[0])
+        extra = await self.shared.query(
+            "SELECT data FROM session_status WHERE instance=? AND session=?",
+            (self.instance, session),
+        )
+        if extra:
+            result.update(json.loads(extra[0]["data"]))
+        return result
+
+    async def sessions(self, chat, user, thread=0, offset=0):
+        rows = await self.shared.query(
+            "SELECT session,title,provider,model FROM session_owners WHERE instance=? AND chat=? "
+            "AND user=? AND thread=? ORDER BY updated DESC,session LIMIT 21 OFFSET ?",
             (self.instance, chat, user, thread, offset),
-        ).fetchall()
+        )
+        return [tuple(row.values()) for row in rows]
 
-    def replace_prompt(self, update, text):
-        with self.db:
-            self.db.execute(
-                "UPDATE inbox SET text=?,status='prompt' WHERE instance=? AND id=?",
-                (text, self.instance, update),
-            )
+    async def replace_prompt(self, update, text):
+        await self.shared.run(
+            "UPDATE inbox SET text=?,status='prompt',version=version+1 WHERE instance=? AND id=?",
+            (text, self.instance, update),
+        )
 
-    def finish_run(self, chat, user, thread, run, status):
-        with self.db:
-            self.db.execute(
-                "UPDATE inbox SET status=? WHERE instance=? AND chat=? AND user=? "
-                "AND thread=? AND run=? AND status='running'",
-                (status, self.instance, chat, user, thread, run),
-            )
+    async def finish_run(self, chat, user, thread, run, status):
+        await self.shared.run(
+            "UPDATE inbox SET status=?,version=version+1 WHERE instance=? AND chat=? AND user=? "
+            "AND thread=? AND run=? AND status='running'",
+            (status, self.instance, chat, user, thread, run),
+        )

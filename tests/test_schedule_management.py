@@ -63,7 +63,7 @@ async def test_specialist_can_schedule_itself_but_cannot_manage_another_persons_
     service, _, _ = web
     worker = await service.store.create_bot("Reader", "Read documents")
     other = await service.store.create_bot("Writer", "Write documents")
-    route = service.store.conversation(11, 11)
+    route = await service.store.conversation(11, 11)
     args = dict(when="every 1h", task="Read documents")
     await service.team.run("schedule_job", args, route, actor=11, bot=worker)
     job = service.store.jobs(actor=11)[0]

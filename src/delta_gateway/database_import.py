@@ -207,7 +207,7 @@ def import_rows(store, config, data, source_key, fingerprint):
                 insert_row(db, "bots", {**bot, "instance": config.instance})
         for row in source_routes:
             key = row["chat"], row.get("user", 0) or 0, row.get("thread", 0) or 0
-            route = store.conversation(*key)
+            route = store.conversation_now(*key)
             if (
                 route.session_file
                 and row.get("session_file")

@@ -61,7 +61,7 @@ async def execute(service, text, bot_name, deadline):
     if bot is None or bot.temporary:
         raise OperatorError("Unknown persistent bot")
     actor = service.config.users[0]
-    route = store.conversation(WEB_CHAT, actor)
+    route = await store.conversation(WEB_CHAT, actor)
     calls = set()
     usage = RunUsage()
 

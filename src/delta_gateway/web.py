@@ -364,7 +364,7 @@ class WebServer:
     async def messages(self, request):
         from aiohttp import web
 
-        history = self.service.store.history(WEB_CHAT, self.actor)
+        history = await self.service.store.history(WEB_CHAT, self.actor)
         return web.json_response(
             [reply_markup(row) if row["direction"] == "outbound" else row for row in history]
         )
@@ -392,11 +392,11 @@ class WebServer:
             )
         text = text.strip()
         if not text.startswith("/") or text.startswith("/skill:"):
-            route = self.service.store.conversation(WEB_CHAT, self.actor)
-            run, number = self.service.runs.queue(route, text, WEB_IDS)
+            route = await self.service.store.conversation(WEB_CHAT, self.actor)
+            run, number = await self.service.runs.queue(route, text, WEB_IDS)
         else:
             run = None
-            number = self.service.store.admit_web(WEB_CHAT, self.actor, text, base=WEB_IDS)
+            number = await self.service.store.admit_web(WEB_CHAT, self.actor, text, base=WEB_IDS)
         await self.service.dispatch()
         return web.json_response(dict(id=number, run=run), status=202)
 

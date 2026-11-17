@@ -9,7 +9,7 @@ from tests.test_gateway import Bot, config, settle, update
 
 
 async def spawn(service, goal="hi", **arguments):
-    route = service.store.conversation(11, 11)
+    route = await service.store.conversation(11, 11)
     text = await service.team.run(
         arguments.pop("tool", "spawn_agent"), dict(goal=goal, **arguments), route, actor=11
     )
@@ -23,7 +23,7 @@ async def finished(service):
 
 
 async def command(service, c, identifier, text):
-    service.store.admit([update(identifier, text)], c)
+    await service.store.admit([update(identifier, text)], c)
     await service.dispatch()
     await settle(service)
 
@@ -150,7 +150,7 @@ async def test_restart_reports_interrupted_work_once(tmp_path):
     store = Store(tmp_path / "state", "a" * 32)
     try:
         assert store.task(task).status == "interrupted"
-        assert [t.id for t in store.take_unreported()] == [task]
-        assert store.take_unreported() == []
+        assert [t.id for t in await store.take_unreported()] == [task]
+        assert await store.take_unreported() == []
     finally:
         store.close()

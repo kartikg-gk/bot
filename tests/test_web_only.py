@@ -32,7 +32,7 @@ async def test_web_only_init_runtime_jobs_and_open_stream_shutdown(tmp_path, mon
     c = load(path)
     assert c.web_only and c.web_port == 0 and c.users == [1] and c.token() is None
     service = Service(c, None, factory="tests.fake_session:create")
-    service.store.admit([update(1, "Pending Telegram message", user=1)], c)
+    await service.store.admit([update(1, "Pending Telegram message", user=1)], c)
     bot = (await service.store.bots())[0].id
     telegram_job = service.store.add_job(1, 1, 1, 0, bot, "Telegram job", "once", 0)
     web_job = service.store.add_job(WEB_CHAT, 1, 1, 0, bot, "Web job", "once", 0)
@@ -53,7 +53,7 @@ async def test_web_only_init_runtime_jobs_and_open_stream_shutdown(tmp_path, mon
                 while service.store.job(web_job).last_status != "completed":
                     await asyncio.sleep(0.02)
             assert service.store.job(telegram_job).status == "active"
-            assert service.store.is_pending(1)
+            assert await service.store.is_pending(1)
             history = (await client.get("/api/messages")).json()
             assert any("turn" in row["text"] for row in history if row["direction"] == "outbound")
             async with client.stream("GET", "/api/stream") as stream:

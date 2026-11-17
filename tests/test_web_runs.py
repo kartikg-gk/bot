@@ -75,7 +75,7 @@ async def test_direct_stream_can_target_unselected_bot(web):
     assert records[-1][2]["run"] == response.headers["x-run-id"]
     assert not (await client.get("/api/messages")).json()
     assert (await client.get(f"/api/bots/{bot.id}/messages")).json()[-1]["role"] == "assistant"
-    assert service.store.conversation(WEB_CHAT, service.config.users[0]).bot != bot.id
+    assert (await service.store.conversation(WEB_CHAT, service.config.users[0])).bot != bot.id
 
 
 async def test_stop_preserves_other_bots_and_queued_messages_and_reload_recovers_review(web):
@@ -118,14 +118,14 @@ async def test_stop_preserves_other_bots_and_queued_messages_and_reload_recovers
     assert frames(await client.get(f"/api/runs/{slow}/events"))[-1][2]["status"] == "cancelled"
 
 
-def test_restart_retains_replay_and_does_not_requeue_inflight_run(tmp_path):
+async def test_restart_retains_replay_and_does_not_requeue_inflight_run(tmp_path):
     c = config(tmp_path)
     store = Store(c.database_path, c.instance)
     journal = RunJournal(store)
-    route = journal.route(WEB_CHAT, 11, None)
-    run, inbox = journal.queue(route, "inflight", WEB_IDS)
-    pending, _ = journal.queue(route, "queued", WEB_IDS)
-    store.mark(inbox, "running")
+    route = await journal.route(WEB_CHAT, 11, None)
+    run, inbox = await journal.queue(route, "inflight", WEB_IDS)
+    pending, _ = await journal.queue(route, "queued", WEB_IDS)
+    await store.mark(inbox, "running")
     journal.emit(run, "run_started", bot=route.bot)
     store.close()
     store = Store(c.database_path, c.instance)

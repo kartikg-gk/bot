@@ -25,11 +25,13 @@ async def test_three_independent_conversations_can_run_by_default(tmp_path):
     c.users = [11, 22, 33]
     service = Service(c, Bot(), factory="tests.fake_session:create")
     try:
-        service.store.admit([update(n, "pause", user=user) for n, user in enumerate(c.users, 1)], c)
+        await service.store.admit(
+            [update(n, "pause", user=user) for n, user in enumerate(c.users, 1)], c
+        )
         for user in c.users:
-            route = service.store.conversation(user, user)
+            route = await service.store.conversation(user, user)
             bot = await service.store.create_bot(f"Helper {user}", "Handle this user's requests")
-            service.store.switch_bot(route, bot)
+            await service.store.switch_bot(route, bot)
         await service.dispatch()
         async with asyncio.timeout(15):
             while True:
@@ -56,7 +58,7 @@ async def test_group_approval_requires_requesting_actor_even_when_both_are_allow
     c.users = [11, 22]
     service = Service(c, Bot(), factory="tests.fake_session:create")
     try:
-        service.store.admit([group_update(1, "write", actor=11)], c)
+        await service.store.admit([group_update(1, "write", actor=11)], c)
         await service.dispatch()
         async with asyncio.timeout(5):
             while not service.cards:

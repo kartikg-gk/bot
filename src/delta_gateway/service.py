@@ -32,7 +32,7 @@ from delta_gateway.previews import Preview, typing
 from delta_gateway.routing import payload
 from delta_gateway.run_usage import RunUsage
 from delta_gateway.session_manager import SessionManager
-from delta_gateway.store import Store
+from delta_gateway.store import Conversation, Store
 from delta_gateway.team import AGENT_SECONDS, MAX_AGENTS, MAX_ANSWER, Team
 from delta_gateway.telegram import TelegramError, chunks
 from delta_gateway.tracing import TraceExporter, traced
@@ -107,9 +107,9 @@ class Service:
         return {
             route.key: self.sessions.clients[self.sessions.identity(route)]
             for row in self.store.db.execute(
-                "SELECT id FROM routes WHERE instance=?", (self.config.instance,)
+                "SELECT * FROM routes WHERE instance=?", (self.config.instance,)
             )
-            if (route := self.store.get_route(row[0]))
+            if (route := Conversation(*row))
             and self.sessions.identity(route) in self.sessions.clients
         }
 
@@ -117,7 +117,7 @@ class Service:
         return await self.telegram.send(key[0], text, **payload(key), **kwargs)
 
     async def reply(self, route, text):
-        self.store.log_message(route, text)
+        await self.store.log_message(route, text)
         for piece in chunks(text, 3900):
             await self.notify(route.key, piece)
 
@@ -131,7 +131,7 @@ class Service:
             digest=event["digest"],
             expires_at=event.get("expiresAt", event.get("expires_at")),
         )
-        self.store.audit(normalized, key[0], actor or key[1], key[2])
+        await self.store.audit(normalized, key[0], actor or key[1], key[2])
         handle = uuid4().hex
         card = dict(
             key=key,
@@ -176,7 +176,7 @@ class Service:
         card = self.cards.pop(handle, None)
         if not card:
             return
-        self.store.decide(card["event"]["approval_id"], allow, source)
+        await self.store.decide(card["event"]["approval_id"], allow, source)
         if card["run"]:
             self.runs.emit(card["run"], "approval_resolved", id=handle, allowed=allow)
         if card["message"] is not None and not self.stopping:
@@ -272,7 +272,7 @@ class Service:
     @traced("prompt")
     @budgeted
     async def prompt(self, item, text=None, behavior=None):
-        route = self.store.conversation(*item.key)
+        route = await self.store.conversation(*item.key)
         run = item.run if item.chat == WEB_CHAT and self.runs else None
         usage = RunUsage() if run else None
         started = False
@@ -281,13 +281,13 @@ class Service:
         self.previews[item.key] = preview
         activity = asyncio.create_task(typing(self.telegram, item.key))
 
-        def before_send():
+        async def before_send():
             nonlocal started
             started = True
-            self.store.mark(item.id, "dispatching")
+            await self.store.mark(item.id, "dispatching")
 
-        def accepted():
-            self.store.mark(item.id, "running")
+        async def accepted():
+            await self.store.mark(item.id, "running")
             if run:
                 self.runs.emit(run, "run_started", bot=route.bot)
 
@@ -338,9 +338,11 @@ class Service:
             kind = record.get("type")
             if kind == "host_tool_call":
                 client = self.sessions.clients[
-                    self.sessions.identity(self.store.get_route(route.id))
+                    self.sessions.identity(await self.store.get_route(route.id))
                 ]
-                host_call(client, record, await self.store.bot(self.store.get_route(route.id).bot))
+                host_call(
+                    client, record, await self.store.bot((await self.store.get_route(route.id)).bot)
+                )
                 return
             if kind in {"agent_start", "message_start", "message_update"}:
                 if (
@@ -362,7 +364,7 @@ class Service:
                 await preview.update("Tool: " + name if kind.endswith("start") else partial)
             elif kind in {"approval_requested", "approval_resolved"}:
                 client = self.sessions.clients[
-                    self.sessions.identity(self.store.get_route(route.id))
+                    self.sessions.identity(await self.store.get_route(route.id))
                 ]
                 await approvals(client, record, route.bot)
 
@@ -372,7 +374,7 @@ class Service:
                     return
                 await preview.update("Working…", force=True)
                 message = item.text if text is None else text
-                bot = await self.store.bot(self.store.get_route(route.id).bot)
+                bot = await self.store.bot((await self.store.get_route(route.id)).bot)
                 # Agent reports carry another model's output; they are never remembered.
                 owner = (
                     owner_for(item.chat, item.actor) if self.memory and item.id <= 2**60 else None
@@ -392,7 +394,7 @@ class Service:
                     behavior=behavior,
                     abort_on_error=bool(run),
                 )
-                self.store.mark(item.id, "delivering")
+                await self.store.mark(item.id, "delivering")
                 final = final or f"Run {outcome}; no assistant text returned."
                 if outcome != "completed" and final:
                     final += f"\n[Run {outcome}]"
@@ -400,9 +402,9 @@ class Service:
                     self.runs.answer(run, final)
                 try:
                     await self.reply(route, final)
-                    self.store.mark(item.id, outcome)
+                    await self.store.mark(item.id, outcome)
                 except TelegramError:
-                    self.store.mark(item.id, "delivery_failed")
+                    await self.store.mark(item.id, "delivery_failed")
                 if owner is not None and outcome == "completed" and self.config.memory_extract:
                     extraction = asyncio.create_task(
                         self.remember_exchange(route, bot, owner, message, final)
@@ -411,10 +413,10 @@ class Service:
                     extraction.add_done_callback(self.memory_tasks.discard)
         except asyncio.CancelledError:
             if started and (not run or self.runs.status(run) != "cancelling"):
-                self.store.mark(item.id, "uncertain")
+                await self.store.mark(item.id, "uncertain")
             raise
         except (RuntimeError, OSError, ValueError):
-            self.store.mark(item.id, "uncertain" if started else "failed")
+            await self.store.mark(item.id, "uncertain" if started else "failed")
             with contextlib.suppress(RuntimeError):
                 await self.sessions.abort(route)
             with contextlib.suppress(TelegramError):
@@ -527,7 +529,7 @@ class Service:
         owner = owner_for(item.chat, item.actor)
         if owner is None:
             return "Memory is personal, so it is off in group chats."
-        bot = await self.store.bot(self.store.conversation(*route.key).bot)
+        bot = await self.store.bot((await self.store.conversation(*route.key)).bot)
         action, _, rest = argument.partition(" ")
         rest = rest.strip()
 
@@ -592,22 +594,22 @@ class Service:
         }[action]
 
     async def forward(self, item, command, argument):
-        route = self.store.conversation(*item.key)
+        route = await self.store.conversation(*item.key)
         status = item.status
-        self.store.mark(item.id, "dispatching")
+        await self.store.mark(item.id, "dispatching")
         try:
             delivered = await self.sessions.forward(route, command[1:], argument)
         except (RuntimeError, OSError):
-            self.store.mark(item.id, "uncertain")
+            await self.store.mark(item.id, "uncertain")
             with contextlib.suppress(TelegramError):
                 await self.notify(
                     item.key, "Delivery uncertain. It was not replayed. Check /status."
                 )
             return True
         if not delivered:
-            self.store.mark(item.id, status)
+            await self.store.mark(item.id, status)
             return False
-        self.store.mark(item.id, "completed")
+        await self.store.mark(item.id, "completed")
         with contextlib.suppress(TelegramError):
             await self.reply(
                 route,
@@ -616,12 +618,12 @@ class Service:
         return True
 
     async def last(self, key):
-        route = self.store.conversation(*key)
+        route = await self.store.conversation(*key)
         result, _ = await self.sessions.control(route, "get_last_assistant_text")
         return result.get("text") or "No assistant message yet."
 
     async def stop(self, item, route):
-        self.store.clear_route_queue(item.key)
+        await self.store.clear_route_queue(item.key)
         if item.chat == WEB_CHAT and self.runs:
             self.runs.recover()
         task = self.jobs.get(item.key)
@@ -637,8 +639,8 @@ class Service:
         return "Abort requested; queued prompts cleared."
 
     async def command(self, item):
-        route = self.store.conversation(*item.key)
-        self.store.mark(item.id, "dispatching")
+        route = await self.store.conversation(*item.key)
+        await self.store.mark(item.id, "dispatching")
         try:
             command, argument = split(item.text)
             if item.status == "rejected":
@@ -649,7 +651,9 @@ class Service:
                 reply = await self.stop(item, route)
             elif command == "/sessions":
                 lines = ["Known sessions:"]
-                for row in self.store.list_routes(item.actor, groups=self.config.allow_groups):
+                for row in await self.store.list_routes(
+                    item.actor, groups=self.config.allow_groups
+                ):
                     marker = "*" if row.id == route.id else " "
                     lines.append(
                         f"{marker} {row.id}: {row.title or '(unnamed)'} {row.session or ''}\n"
@@ -691,9 +695,9 @@ class Service:
             else:
                 reply = "Unknown command. Use /help."
             await self.reply(route, reply)
-            self.store.mark(item.id, "completed")
+            await self.store.mark(item.id, "completed")
         except (ValueError, RuntimeError, OSError) as exc:
-            self.store.mark(
+            await self.store.mark(
                 item.id, "delivery_failed" if isinstance(exc, TelegramError) else "failed"
             )
             with contextlib.suppress(TelegramError):
@@ -755,7 +759,7 @@ class Service:
     @budgeted
     async def run_task(self, identifier, delegation):
         task = self.store.task(identifier)
-        route = self.store.conversation(*task.key)
+        route = await self.store.conversation(*task.key)
         calls = set()
         bot = None
 
@@ -796,9 +800,9 @@ class Service:
                 f"Task #{identifier} ({getattr(bot, 'name', 'agent')}), {status}:\n"
                 f"{answer or 'No answer.'}",
             )
-        current = await self.store.bot(self.store.get_route(route.id).bot)
+        current = await self.store.bot((await self.store.get_route(route.id)).bot)
         if task.follow_up and current.chief:
-            self.store.add_report(
+            await self.store.add_report(
                 task,
                 f"Task #{identifier} ({getattr(bot, 'name', 'agent')}) ended: {status}. "
                 "This is a report, not "
@@ -872,7 +876,7 @@ class Service:
     @budgeted
     async def run_job(self, job):
         bot = await self.store.bot(job.bot)
-        route = self.store.conversation(*job.key)
+        route = await self.store.conversation(*job.key)
         calls = set()
 
         def host_call(client, record, caller):
@@ -972,7 +976,7 @@ class Service:
         action, name, target = (argument.split(maxsplit=2) + ["", "", ""])[:3]
         if action not in {"on", "off"} or name not in PLUGINS:
             raise ValueError("Use /plugin on|off <name> [bot]")
-        current = self.store.conversation(*route.key)
+        current = await self.store.conversation(*route.key)
         bot = await self.store.find_bot(target) if target else await self.store.bot(current.bot)
         if not bot:
             raise ValueError("No bot with that name. Use /bot to list them.")
@@ -983,7 +987,7 @@ class Service:
         return f"{name} is {action} for {bot.name}. It applies from the bot's next start."
 
     async def bot_command(self, route, argument):
-        route = self.store.conversation(*route.key)
+        route = await self.store.conversation(*route.key)
         if not argument:
             lines = [
                 f"{'*' if bot.id == route.bot else ' '} {bot.name}: {bot.role[:200]}"
@@ -1004,34 +1008,34 @@ class Service:
 
     @traced("control")
     async def control(self, item):
-        route = self.store.conversation(*item.key)
+        route = await self.store.conversation(*item.key)
         started = False
 
-        def before_send():
+        async def before_send():
             nonlocal started
             started = True
-            self.store.mark(item.id, "dispatching")
+            await self.store.mark(item.id, "dispatching")
 
         try:
             async with self.slots:
                 command, argument = split(item.text)
                 if command == "/bot":
-                    before_send()
+                    await before_send()
                     reply = await self.bot_command(route, argument)
                 elif command in {"/tasks", "/cancel", "/keep", "/discard"}:
-                    before_send()
+                    await before_send()
                     reply = await self.task_command(command, argument)
                 elif command == "/memory":
-                    before_send()
+                    await before_send()
                     reply = await self.memory_command(route, item, argument)
                 elif command in {"/plugin", "/plugins"}:
-                    before_send()
+                    await before_send()
                     reply = await self.plugin_command(route, command, argument)
                 elif command in {"/jobs", "/schedule", "/unschedule", "/pausejob", "/resumejob"}:
-                    before_send()
+                    await before_send()
                     reply = await self.schedule_command(route, item.actor, command, argument)
                 elif command == "/switch":
-                    target = self.store.get_route(int(argument))
+                    target = await self.store.get_route(int(argument))
                     if not target or target.user not in {0, item.actor}:
                         raise ValueError("Unknown conversation or another user's session")
                     if target.chat < 0 and (
@@ -1039,11 +1043,11 @@ class Service:
                         or (self.config.groups and target.chat not in self.config.groups)
                     ):
                         raise ValueError("Conversation is outside the allowed groups")
-                    before_send()
+                    await before_send()
                     await self.sessions.switch(route, target)
                     reply = f"Switched this chat to session from conversation {target.id}."
                 elif command == "/last":
-                    before_send()
+                    await before_send()
                     reply = await self.last(item.key)
                 else:
                     operations = {
@@ -1110,15 +1114,15 @@ class Service:
                         reply = "Model set to " + argument
                     else:
                         reply = "Thinking level set to " + argument
-                self.store.mark(item.id, "delivering")
+                await self.store.mark(item.id, "delivering")
                 await self.reply(route, reply)
-                self.store.mark(item.id, "completed")
+                await self.store.mark(item.id, "completed")
         except asyncio.CancelledError:
             if started:
-                self.store.mark(item.id, "uncertain")
+                await self.store.mark(item.id, "uncertain")
             raise
         except (ValueError, RuntimeError, OSError, KeyError) as exc:
-            self.store.mark(
+            await self.store.mark(
                 item.id, "delivery_failed" if isinstance(exc, TelegramError) else "failed"
             )
             with contextlib.suppress(TelegramError):
@@ -1146,9 +1150,9 @@ class Service:
             except Exception:
                 status = self.runs.status(run)
                 if status in {"dispatching", "running", "delivering"}:
-                    self.store.mark(item.id, "uncertain")
+                    await self.store.mark(item.id, "uncertain")
                 elif status in {"pending", "prompt", "scheduled"}:
-                    self.store.mark(item.id, "failed")
+                    await self.store.mark(item.id, "failed")
                 raise
             finally:
                 self.runs.finish(run)
@@ -1159,7 +1163,7 @@ class Service:
 
     async def stop_web_run(self, run, actor):
         async with self.dispatch_lock:
-            if not self.runs.cancel(run, actor):
+            if not await self.runs.cancel(run, actor):
                 return False
             active = self.run_tasks.get(run)
             if active:
@@ -1175,10 +1179,10 @@ class Service:
                 if job.done():
                     await asyncio.gather(job, return_exceptions=True)
                     self.jobs.pop(key, None)
-            for item in self.store.items():
+            for item in await self.store.items():
                 if self.config.web_only and item.chat != WEB_CHAT:
                     continue
-                if not self.store.is_pending(item.id):
+                if not await self.store.is_pending(item.id):
                     continue
                 command, argument = split(item.text)
                 is_command = item.status != "prompt" and item.text.startswith("/")
@@ -1188,13 +1192,13 @@ class Service:
                     await self.command(item)
                 elif is_command and command in {"/queue", "/steer", "/delta"}:
                     if not argument:
-                        self.store.mark(item.id, "failed")
+                        await self.store.mark(item.id, "failed")
                         with contextlib.suppress(TelegramError):
                             await self.notify(item.key, f"Use {command} <text>")
                     elif command != "/delta" and await self.forward(item, command, argument):
                         pass
                     elif item.key not in self.jobs:
-                        self.store.replace_prompt(item.id, argument)
+                        await self.store.replace_prompt(item.id, argument)
                         item.text, item.status = argument, "prompt"
                         self.launch_prompt(
                             item, behavior={"/steer": "steer", "/queue": "followUp"}.get(command)
@@ -1227,20 +1231,20 @@ class Service:
                     }:
                         await self.command(item)
                     elif item.key not in self.jobs:
-                        self.store.mark(item.id, "scheduled")
+                        await self.store.mark(item.id, "scheduled")
                         self.jobs[item.key] = asyncio.create_task(self.control(item))
                 elif item.key not in self.jobs:
                     if item.status != "prompt":
-                        self.store.mark(item.id, "scheduled")
+                        await self.store.mark(item.id, "scheduled")
                     self.launch_prompt(item)
-            for item in self.store.items():
+            for item in await self.store.items():
                 if self.config.web_only and item.chat != WEB_CHAT:
                     continue
                 if (
                     item.status == "prompt" or not item.text.startswith("/")
                 ) and item.key not in self.jobs:
                     if item.status != "prompt":
-                        self.store.mark(item.id, "scheduled")
+                        await self.store.mark(item.id, "scheduled")
                     self.launch_prompt(item)
 
     async def cleanup_idle(self):
@@ -1258,7 +1262,7 @@ class Service:
         if hasattr(self.telegram, "start"):
             await self.telegram.start(lambda _: self.dispatch(), self.callback)
         bot = await self.telegram.call("getMe")
-        self.store.bind_bot(bot["id"])
+        await self.store.bind_bot(bot["id"])
         if (await self.telegram.call("getWebhookInfo")).get("url"):
             raise TelegramError("Webhook configured; remove it explicitly before long polling")
         with contextlib.suppress(TelegramError):
@@ -1303,7 +1307,9 @@ class Service:
             for user in self.config.users:
                 with contextlib.suppress(TelegramError):
                     await self.telegram.send(user, "Delta gateway connected.")
-        for task in self.store.take_unreported(chat=WEB_CHAT if self.config.web_only else None):
+        for task in await self.store.take_unreported(
+            chat=WEB_CHAT if self.config.web_only else None
+        ):
             with contextlib.suppress(TelegramError):
                 await self.notify(task.key, f"Task #{task.id} was interrupted and not replayed.")
         if self.memory:
@@ -1322,12 +1328,12 @@ class Service:
             else:
                 updates = await self.telegram.call(
                     "getUpdates",
-                    offset=self.store.offset,
+                    offset=await self.store.offset(),
                     timeout=1,
                     limit=100,
                     allowed_updates=["message", "callback_query"],
                 )
-                self.store.admit(updates, self.config, bot["id"], bot.get("username", ""))
+                await self.store.admit(updates, self.config, bot["id"], bot.get("username", ""))
                 for update in updates:
                     if hasattr(self.telegram, "dispatch"):
                         await self.telegram.dispatch(update)
@@ -1335,7 +1341,7 @@ class Service:
                         await self.callback(callback)
             await self.dispatch()
             await self.cleanup_idle()
-            self.store.retain()
+            await self.store.retain()
 
     async def close(self):
         self.stopping = True

@@ -48,31 +48,31 @@ class Bot:
 
 async def settle(service):
     async with asyncio.timeout(10):
-        while service.jobs or service.store.pending():
+        while service.jobs or await service.store.pending():
             await service.dispatch()
             await asyncio.sleep(0.02)
 
 
-def test_config_store_duplicates_recovery_retention(tmp_path):
+async def test_config_store_duplicates_recovery_retention(tmp_path):
     c = config(tmp_path)
     save(tmp_path / "config.json", c)
     assert load(tmp_path / "config.json") == c
     store = Store(c.state, c.instance)
-    store.admit([update(1), update(1), update(2, user=33), update(3, kind="group")], c)
-    assert len(store.pending()) == 1
-    assert store.offset == 4
-    store.mark(1, "running", "r1")
+    await store.admit([update(1), update(1), update(2, user=33), update(3, kind="group")], c)
+    assert len(await store.pending()) == 1
+    assert await store.offset() == 4
+    await store.mark(1, "running", "r1")
     store.close()
     store = Store(c.state, c.instance)
     assert store.issues() == [(1, 11, "uncertain", 11, 0)]
-    assert not store.pending()
-    store.mark(1, "completed")
+    assert not await store.pending()
+    await store.mark(1, "completed")
     with store.db:
         store.db.execute("UPDATE inbox SET created=0")
-    store.retain(days=7)
+    await store.retain(days=7)
     assert store.db.execute("SELECT text FROM inbox").fetchone()[0] is None
-    store.admit([update(1)], c)
-    assert not store.pending()
+    await store.admit([update(1)], c)
+    assert not await store.pending()
     store.close()
 
 
@@ -80,22 +80,22 @@ async def test_service_stream_resume_last_and_new(tmp_path):
     c, bot = config(tmp_path), Bot()
     service = Service(c, bot, factory="tests.fake_session:create")
     try:
-        service.store.admit([update(1), update(1), update(2, user=22)], c)
+        await service.store.admit([update(1), update(1), update(2, user=22)], c)
         await settle(service)
         assert any("turn 1: done" == text for _, text, _ in bot.sent)
         assert len(service.clients) == 1
         assert await service.last((11, 11, 0)) == "turn 1: done"
-        session = service.store.mapping(11, 11, 0)[0]
+        session = (await service.store.mapping(11, 11, 0))[0]
     finally:
         await service.close()
     service = Service(c, bot, factory="tests.fake_session:create")
     try:
-        service.store.admit([update(3)], c)
+        await service.store.admit([update(3)], c)
         await settle(service)
         assert any("turn 2: done" == text for _, text, _ in bot.sent)
-        service.store.admit([update(4, "/new")], c)
+        await service.store.admit([update(4, "/new")], c)
         await settle(service)
-        assert service.store.mapping(11, 11, 0)[0] != session
+        assert (await service.store.mapping(11, 11, 0))[0] != session
         assert (c.state / "sessions" / f"{session}.jsonl").exists()
     finally:
         await service.close()
@@ -105,15 +105,15 @@ async def test_service_stop_is_responsive_and_clears_queue(tmp_path):
     c, bot = config(tmp_path), Bot()
     service = Service(c, bot, factory="tests.fake_session:create")
     try:
-        service.store.admit([update(1, "slow"), update(2, "queued")], c)
+        await service.store.admit([update(1, "slow"), update(2, "queued")], c)
         await service.dispatch()
         async with asyncio.timeout(5):
             while not bot.edits:
                 await asyncio.sleep(0.02)
-        service.store.admit([update(3, "/stop")], c)
+        await service.store.admit([update(3, "/stop")], c)
         await asyncio.wait_for(service.dispatch(), 3)
         await settle(service)
-        assert not service.store.pending()
+        assert not await service.store.pending()
         assert any(text.startswith("Abort requested") for _, text, _ in bot.sent)
     finally:
         await service.close()
@@ -180,11 +180,11 @@ def test_unicode_chunk_limits():
     assert all(len(p.encode("utf-16-le")) // 2 <= 3500 for p in pieces)
 
 
-def test_backlog_and_newer_schema(tmp_path):
+async def test_backlog_and_newer_schema(tmp_path):
     c = config(tmp_path, backlog=1)
     store = Store(c.state, c.instance)
-    store.admit([update(1), update(2), update(3, "/stop")], c)
-    assert [r[4] for r in store.pending()] == ["pending", "rejected", "pending"]
+    await store.admit([update(1), update(2), update(3, "/stop")], c)
+    assert [r[4] for r in await store.pending()] == ["pending", "rejected", "pending"]
     store.db.execute("PRAGMA user_version=99")
     store.close()
     with pytest.raises(ValueError):
@@ -195,7 +195,7 @@ async def test_service_approval_and_failed_final_delivery(tmp_path):
     c, bot = config(tmp_path), Bot()
     service = Service(c, bot, factory="tests.fake_session:create")
     try:
-        service.store.admit([update(1, "write")], c)
+        await service.store.admit([update(1, "write")], c)
         await service.dispatch()
         async with asyncio.timeout(5):
             while not service.cards:
@@ -223,13 +223,13 @@ async def test_stop_pending_approval_and_stale_button(tmp_path):
     c, bot = config(tmp_path), Bot()
     service = Service(c, bot, factory="tests.fake_session:create")
     try:
-        service.store.admit([update(1, "write")], c)
+        await service.store.admit([update(1, "write")], c)
         await service.dispatch()
         async with asyncio.timeout(5):
             while not service.cards:
                 await asyncio.sleep(0.02)
         handle = next(iter(service.cards))
-        service.store.admit([update(2, "/stop")], c)
+        await service.store.admit([update(2, "/stop")], c)
         await asyncio.wait_for(service.dispatch(), 3)
         await settle(service)
         await service.callback(
@@ -340,7 +340,7 @@ async def test_worker_cap_and_webhook_refusal(tmp_path):
     c.users = [11, 22]
     service = Service(c, Bot(), factory="tests.fake_session:create")
     try:
-        service.store.admit([update(1, "slow"), update(2, "hello", user=22)], c)
+        await service.store.admit([update(1, "slow"), update(2, "hello", user=22)], c)
         await service.dispatch()
         async with asyncio.timeout(5):
             while not service.clients:

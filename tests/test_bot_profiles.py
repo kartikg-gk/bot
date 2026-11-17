@@ -18,8 +18,8 @@ async def test_foreground_and_delegation_share_bot_reservation(web):
     service, _, _ = web
     manager = service.sessions
     bot = await service.store.create_bot("Reader", "Read documents")
-    route = service.store.conversation(11, 11)
-    route = service.store.switch_bot(route, bot)
+    route = await service.store.conversation(11, 11)
+    route = await service.store.switch_bot(route, bot)
     foreground = asyncio.create_task(manager.prompt(route, "slow"))
     await wait_working(manager, bot)
     delegation = asyncio.create_task(manager.delegate(bot, "Follow up", policy="deny"))
@@ -63,7 +63,7 @@ async def test_self_update_reloads_cached_engine_and_only_changes_self(web):
     manager = service.sessions
     bot = await service.store.create_bot("Reader", "Old purpose")
     chief = (await service.store.bots())[0]
-    route = service.store.switch_bot(service.store.conversation(11, 11), bot)
+    route = await service.store.switch_bot(await service.store.conversation(11, 11), bot)
     await manager.prompt(route, "hello")
     before = next(iter(manager.clients.values()))
     await Team(service.store, manager).run(

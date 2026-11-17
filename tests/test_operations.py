@@ -25,7 +25,7 @@ def group(text="@testbot hello", *, user=11, thread=7):
     }
 
 
-def test_group_topic_allowlists_and_ownership(tmp_path):
+async def test_group_topic_allowlists_and_ownership(tmp_path):
     c = config(tmp_path, allow_groups=True, groups=[-100])
     assert admit_message(group(), c, 99, "testbot") == (-100, 11, 7, "hello")
     assert admit_message(group("/status@testbot"), c, 99, "testbot")
@@ -37,26 +37,26 @@ def test_group_topic_allowlists_and_ownership(tmp_path):
     assert admit_message(message, c, 99, "testbot")
     store = Store(c.state, c.instance)
     try:
-        store.map(-100, 11, 7, "session-a", True)
-        store.map(-100, 11, 8, "session-b", True)
-        assert not store.owns(-100, 11, 8, "session-a")
+        await store.map(-100, 11, 7, "session-a", True)
+        await store.map(-100, 11, 8, "session-b", True)
+        assert not await store.owns(-100, 11, 8, "session-a")
         with pytest.raises(ValueError):
-            store.map(-100, 11, 8, "session-a")
-        assert store.mapping(-100, 11, 7)[0] == "session-a"
-        store.admit(
+            await store.map(-100, 11, 8, "session-a")
+        assert (await store.mapping(-100, 11, 7))[0] == "session-a"
+        await store.admit(
             [{"update_id": 1, "message": group()}, {"update_id": 2, "message": group(thread=8)}],
             c,
             99,
             "testbot",
         )
-        store.clear_queue(-100, 11, 7)
-        assert [row[5] for row in store.pending()] == [8]
+        await store.clear_queue(-100, 11, 7)
+        assert [row[5] for row in await store.pending()] == [8]
     finally:
         store.close()
 
 
 @pytest.mark.parametrize("version", [1, 2])
-def test_upgrade_preserves_routes_receipts_and_backup(tmp_path, version):
+async def test_upgrade_preserves_routes_receipts_and_backup(tmp_path, version):
     c = config(tmp_path)
     c.state.mkdir()
     with sqlite3.connect(c.state / "gateway.sqlite3") as db:
@@ -77,10 +77,10 @@ def test_upgrade_preserves_routes_receipts_and_backup(tmp_path, version):
         db.execute("INSERT INTO poll_state VALUES(?,42)", (c.instance,))
     store = Store(c.state, c.instance)
     try:
-        assert store.mapping(11, 11, 0) == ("old", 1)
-        assert store.owns(11, 11, 0, "old")
-        assert store.offset == 42
-        assert store.pending()[0][4:] == ("pending", 0)
+        assert await store.mapping(11, 11, 0) == ("old", 1)
+        assert await store.owns(11, 11, 0, "old")
+        assert await store.offset() == 42
+        assert (await store.pending())[0][4:] == ("pending", 0)
         backup = next(c.state.glob(f"gateway.before-v{SCHEMA}-*.sqlite3"))
         with sqlite3.connect(backup) as db:
             assert db.execute("PRAGMA user_version").fetchone()[0] == version
