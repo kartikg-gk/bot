@@ -1,4 +1,4 @@
-"""Hosted runs start from the earlier messages the browser sends, as the reference does.
+"""Hosted runs start from the earlier messages the browser sends.
 
 A hosted function keeps no agent session between requests. The browser sends up to 20
 earlier messages of up to 4000 characters each with a run; they are kept next to the

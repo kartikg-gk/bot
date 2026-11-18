@@ -1,7 +1,7 @@
 """The process that owns an instance's scheduled work when the web runs elsewhere.
 
 Hosted web requests are short and many; scheduled jobs and event wake-ups need one
-long-lived owner, as in the reference. The runner holds a database lease for the
+long-lived owner. The runner holds a database lease for the
 instance (60 seconds, renewed while it runs), so a second runner is refused and a
 crashed one is replaced once its lease expires. Only the lease holder settles work a
 previous run left unfinished. It does no Telegram polling.

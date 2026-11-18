@@ -1,4 +1,4 @@
-"""Hosted runs start from the earlier messages the browser sends, as the reference does."""
+"""Hosted runs start from the earlier messages the browser sends."""
 
 import pytest
 
