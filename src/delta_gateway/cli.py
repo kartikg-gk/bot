@@ -117,6 +117,13 @@ def parser():
     runner.add_argument("-c", "--config", type=Path, default=argparse.SUPPRESS)
     runner.add_argument("-i", "--instance", default=argparse.SUPPRESS)
     runner.add_argument("--once", action="store_true", help="Run only the jobs due now")
+    db = commands.add_parser("db", help="Check the database, or import local state into D1")
+    db.add_argument("-c", "--config", type=Path, default=argparse.SUPPRESS)
+    db.add_argument("-i", "--instance", default=argparse.SUPPRESS)
+    db.add_argument("action", choices=["check", "import"])
+    db.add_argument(
+        "--from", dest="source", type=Path, help="Local SQLite file; defaults to the config's"
+    )
     instances = commands.add_parser("instances")
     instances.add_argument("action", nargs="?", choices=["list", "forget"], default="list")
     instances.add_argument("target", nargs="?")
