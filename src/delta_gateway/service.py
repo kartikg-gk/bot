@@ -2,6 +2,7 @@
 
 import asyncio
 import contextlib
+import logging
 import os
 import shutil
 import time
@@ -11,7 +12,7 @@ from uuid import uuid4
 from delta_gateway.bots import bot_root, workspace
 from delta_gateway.budget import ModelBudget, budgeted, operation
 from delta_gateway.commands import split
-from delta_gateway.errors import RequestRejected, WorkerLost
+from delta_gateway.errors import RequestRejected, SetupError, WorkerLost
 from delta_gateway.file_tables import hosted
 from delta_gateway.hosted_runs import entries, take_context
 from delta_gateway.mem0_extract import Mem0Extractor
@@ -427,15 +428,18 @@ class Service:
             if started and (not run or await self.runs.status(run) != "cancelling"):
                 await self.store.mark(item.id, "uncertain")
             raise
-        except (RuntimeError, OSError, ValueError):
+        except (RuntimeError, OSError, ValueError) as exc:
             await self.store.mark(item.id, "uncertain" if started else "failed")
             with contextlib.suppress(RuntimeError):
                 await self.sessions.abort(route)
+            if isinstance(exc, SetupError):
+                logging.getLogger(__name__).warning("%s", exc)
+                text = str(exc)
+            else:
+                logging.getLogger(__name__).warning("A task stopped: %s", type(exc).__name__)
+                text = "Task interrupted or could not start. It was not replayed. Check /status."
             with contextlib.suppress(TelegramError):
-                await self.notify(
-                    item.key,
-                    "Task interrupted or could not start. It was not replayed. Check /status.",
-                )
+                await self.notify(item.key, text)
         finally:
             for call in list(host_calls):
                 call.cancel()

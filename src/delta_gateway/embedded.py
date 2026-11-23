@@ -13,7 +13,7 @@ from uuid import uuid4
 
 from delta_gateway.budget import ModelBudget, limited_server
 from delta_gateway.computer import ManagedComputer
-from delta_gateway.errors import RequestRejected, WorkerLost
+from delta_gateway.errors import RequestRejected, SetupError, WorkerLost
 from delta_gateway.tools import computer_tools
 from delta_gateway.tracing import observe
 
@@ -179,9 +179,15 @@ class EmbeddedClient:
         from delta_gateway.plugins import resolved
 
         try:
-            provider, name, model = await resolved(
-                (self.make_provider or default_provider)(self.config)
-            )
+            from delta_app.catalog import CatalogError
+            from delta_model.settings import ConfigError
+
+            try:
+                provider, name, model = await resolved(
+                    (self.make_provider or default_provider)(self.config)
+                )
+            except (ConfigError, CatalogError) as error:
+                raise SetupError(f"The bot could not start: {error}") from None
             if self.budget is not None:
                 provider = self.budget.wrap(provider, name)
             available = await self.plugin_definitions() if self.plugin_definitions else {}
