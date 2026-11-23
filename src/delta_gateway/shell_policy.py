@@ -9,9 +9,11 @@ def family(names):
 
 
 DELETION = family(
-    "rm|rmdir|shred|dd|mkfs(?:\\.[a-z0-9]+)?|wipefs|fdisk|parted|remove-item|clear-disk|"
-    "format-volume"
+    "rm|rmdir|shred|truncate|dd|mkfs(?:\\.[a-z0-9]+)?|wipefs|fdisk|parted|remove-item|"
+    "clear-disk|format-volume"
 )
+# find deletes on its own with -delete, without calling rm.
+FIND_DELETE = family("find") + r"[^\n;&|]*\s-delete\b"
 SYSTEM = family("sudo|su|doas|chmod|chown|shutdown|reboot|poweroff|halt")
 WINDOWS = family("del|erase|rd|diskpart|format|takeown|icacls|stop-computer|restart-computer")
 GIT = family("git")
@@ -19,6 +21,7 @@ DOWNLOAD = family("curl|wget|invoke-webrequest|iwr")
 SHELL = family("sh|bash|dash|zsh|fish|pwsh|powershell|cmd|iex|invoke-expression")
 RULES = (
     (re.compile(DELETION, re.I), "File deletion and disk operations are blocked."),
+    (re.compile(FIND_DELETE, re.I), "File deletion and disk operations are blocked."),
     (re.compile(SYSTEM, re.I), "Privilege, access and system changes are blocked."),
     (
         re.compile(
