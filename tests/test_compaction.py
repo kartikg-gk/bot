@@ -51,7 +51,7 @@ def test_latest_request_kept_in_ordinary_chat():
 
 @pytest.mark.xfail(
     strict=True,
-    reason="Known gap: Delta summarises a lone opening request; the fix belongs in Delta",
+    reason="Delta summarises a lone opening request; the gateway appends it to the summary",
 )
 def test_single_request_kept_when_whole_task_is_one_long_turn():
     # Scheduled jobs, delegated work and one-shot tasks start with one request

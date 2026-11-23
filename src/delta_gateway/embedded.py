@@ -188,6 +188,9 @@ class EmbeddedClient:
                 )
             except (ConfigError, CatalogError) as error:
                 raise SetupError(f"The bot could not start: {error}") from None
+            from delta_gateway.keep_request import RequestKeeper
+
+            keeper = RequestKeeper(provider)
             if self.budget is not None:
                 provider = self.budget.wrap(provider, name)
             available = await self.plugin_definitions() if self.plugin_definitions else {}
@@ -230,6 +233,7 @@ class EmbeddedClient:
                     self.lease = SessionLease(
                         session.session_file.parent / "locks", session.session_id
                     )
+            keeper.install(session)
             server_type = limited_server(RpcServer, self.budget) if self.budget else RpcServer
             self.server = server_type(
                 session,
